@@ -4,14 +4,21 @@ import json
 import os
 from typing import Optional, Tuple
 
-import flag_gems
+# int8 (纯官方 torchao) 栈不装 flag_gems;只用 CpuPlatformFL 平台优化,不走 int4 TLE。
+# flag_gems 缺失时降级为 None,运行时用到它的函数(int4/GPU 路径)在 int8 场景不会被调用。
 try:
-    # FlagGems<=5.0.2: DeviceDetector lives in device.
-    from flag_gems.runtime.backend.device import DeviceDetector
-except (ImportError, FileNotFoundError):
-    # FlagGems>5.0.2: DeviceDetector lives in device_finder.
-    from flag_gems.runtime.backend.device_finder import DeviceDetector
-from flag_gems.runtime import backend
+    import flag_gems
+    try:
+        # FlagGems<=5.0.2: DeviceDetector lives in device.
+        from flag_gems.runtime.backend.device import DeviceDetector
+    except (ImportError, FileNotFoundError):
+        # FlagGems>5.0.2: DeviceDetector lives in device_finder.
+        from flag_gems.runtime.backend.device_finder import DeviceDetector
+    from flag_gems.runtime import backend
+except ImportError:
+    flag_gems = None
+    DeviceDetector = None
+    backend = None
 
 _OP_CONFIG: Optional[dict[str, str]] = None
 

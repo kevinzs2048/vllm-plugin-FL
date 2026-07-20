@@ -2,6 +2,7 @@
 
 import os
 import logging
+import platform
 import sys
 
 # torch.float4_e2m1fn_x2 exists only in CUDA builds of PyTorch 2.7+.
@@ -23,6 +24,15 @@ from . import version as version  # PyTorch-style: vllm_fl.version.git_version
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_arm_cpu() -> bool:
+    """Return whether this host is an ARM CPU.
+
+    int8 (纯官方 torchao) 栈不装 flag_gems,故不用 DeviceInfo/DeviceDetector 检测 vendor,
+    直接按机器架构判断——本机就是 AArch64 CPU,足以选中 CpuPlatformFL。
+    """
+    return platform.machine().lower() in {"aarch64", "arm64"}
 
 
 def __getattr__(name):
@@ -95,6 +105,12 @@ def _patch_custom_ops():
 
 def register():
     """Register the FL platform."""
+    # PlatformFL is accelerator-shaped. ARM CPU uses vLLM's native CPU platform
+    # plus the FL TLE-raw W4A8 integration installed by register_model().
+    if _is_arm_cpu():
+        logger.info("[vllm_fl] ARM CPU -> FL CPU platform (native-backed)")
+        return "vllm_fl.platform_cpu.CpuPlatformFL"
+
     _patch_custom_ops()
     _patch_flash_attn_import()
     _patch_transformers_compat()
@@ -136,6 +152,39 @@ def register_router():
 
 def register_model():
     """Register FL-specific models not yet upstream."""
+    from vllm.platforms import current_platform
+    if current_platform.device_type == "cpu" and _is_arm_cpu():
+        # int8 W8A16 via torch-native fused int8pack (FL_CPU_INT8=1) — priority
+        # over int4. Pure official torch op (_weight_int8pack_mm), online-quantized.
+        if os.environ.get("FL_CPU_INT8", "0").lower() in {"1", "true"}:
+            int8_backend = os.environ.get(
+                "FL_CPU_INT8_BACKEND", "kleidiai"
+            ).lower()
+            if int8_backend == "kleidiai":
+                from vllm_fl.ops.cpu_int8_kai import enable_int8
+            elif int8_backend == "torchpack":
+                from vllm_fl.ops.cpu_int8_pack import enable_int8
+            else:
+                raise ValueError(
+                    "FL_CPU_INT8_BACKEND must be 'kleidiai' or 'torchpack'"
+                )
+
+            enable_int8()
+            return
+        enabled = os.environ.get("FL_CPU_INT4", "1").lower()
+        if enabled not in {"0", "1", "false", "true"}:
+            raise ValueError("FL_CPU_INT4 must be one of: 0, 1, false, true")
+        if enabled in {"1", "true"}:
+            backend = os.environ.get("FL_CPU_INT4_BACKEND", "tleraw").lower()
+            if backend != "tleraw":
+                raise ValueError("FL_CPU_INT4_BACKEND must be 'tleraw'")
+            from vllm_fl.ops.cpu_int4_tleraw import enable_int4
+
+            enable_int4()
+        else:
+            logger.info("[vllm_fl] FL_CPU_INT4=0 -> bf16 (int4 op skipped)")
+        return
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them
