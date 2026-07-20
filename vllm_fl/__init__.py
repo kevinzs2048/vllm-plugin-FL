@@ -160,13 +160,15 @@ def register_model():
             int8_backend = os.environ.get(
                 "FL_CPU_INT8_BACKEND", "kleidiai"
             ).lower()
-            if int8_backend == "kleidiai":
+            if int8_backend == "tleraw":
+                from vllm_fl.ops.cpu_int8_tleraw import enable_int8
+            elif int8_backend == "kleidiai":
                 from vllm_fl.ops.cpu_int8_kai import enable_int8
             elif int8_backend == "torchpack":
                 from vllm_fl.ops.cpu_int8_pack import enable_int8
             else:
                 raise ValueError(
-                    "FL_CPU_INT8_BACKEND must be 'kleidiai' or 'torchpack'"
+                    "FL_CPU_INT8_BACKEND must be 'tleraw', 'kleidiai' or 'torchpack'"
                 )
 
             enable_int8()
