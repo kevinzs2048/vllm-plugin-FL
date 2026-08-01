@@ -14,6 +14,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from shutil import which
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+from setuptools.dist import Distribution
 
 ROOT_DIR = Path(__file__).parent.resolve()
 logger = logging.getLogger(__name__)
@@ -33,6 +35,27 @@ CMAKE_BUILD_TYPE = os.environ.get("CMAKE_BUILD_TYPE")
 VERBOSE = os.environ.get("VERBOSE", "0") == "1"
 
 SUPPORTED_VENDORS = ("cuda",)
+IS_ARM64 = platform.machine().lower() in {"aarch64", "arm64"}
+
+# Runtime files for the unified ARM CPU W4A8/W8A8 implementation. W4A8 keeps
+# KleidiAI itself external and packages only its FL-owned C sources. The
+# current W8A8 implementation still carries its prebuilt AArch64 KleidiAI
+# assets, so ARM wheels containing them must be platform-specific.
+ARM_CPU_PACKAGE_FILES = (
+    "cpu_int4_pack.c",
+    "cpu_int4_tle_wrapper.c",
+    "cpu_int8_kai_wrapper.c",
+    "cpu_int8_tle_wrapper.c",
+    "libkai_w8a8.so",
+    "libkai_w8a8_ukernels.o",
+)
+ARM_NATIVE_PACKAGE_FILES = (
+    "libkai_w8a8.so",
+    "libkai_w8a8_ukernels.o",
+)
+ARM_NATIVE_ASSETS = tuple(
+    ROOT_DIR / "vllm_fl/ops" / filename for filename in ARM_NATIVE_PACKAGE_FILES
+)
 
 
 def _is_cuda() -> bool:
@@ -168,6 +191,16 @@ class CMakeBuildExt(build_ext):
             shutil.copy2(built_ext, dest_path)
 
 
+class PlatformDistribution(Distribution):
+    """Mark wheels carrying prebuilt AArch64 W8A8 assets as native."""
+
+    def has_ext_modules(self) -> bool:
+        has_arm_assets = IS_ARM64 and all(
+            path.is_file() for path in ARM_NATIVE_ASSETS
+        )
+        return super().has_ext_modules() or has_arm_assets
+
+
 ext_modules = []
 if VLLM_VENDOR:
     if VLLM_VENDOR not in SUPPORTED_VENDORS:
@@ -183,4 +216,9 @@ if VLLM_VENDOR:
 setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": CMakeBuildExt} if ext_modules else {},
+    distclass=PlatformDistribution,
+    package_data={"vllm_fl.ops": ARM_CPU_PACKAGE_FILES} if IS_ARM64 else {},
+    exclude_package_data={"vllm_fl.ops": ARM_CPU_PACKAGE_FILES}
+    if not IS_ARM64
+    else {},
 )

@@ -154,9 +154,12 @@ def register_model():
     """Register FL-specific models not yet upstream."""
     from vllm.platforms import current_platform
     if current_platform.device_type == "cpu" and _is_arm_cpu():
-        # int8 W8A16 via torch-native fused int8pack (FL_CPU_INT8=1) — priority
-        # over int4. Pure official torch op (_weight_int8pack_mm), online-quantized.
-        if os.environ.get("FL_CPU_INT8", "0").lower() in {"1", "true"}:
+        # W8A8 dynamic quantization has priority when explicitly enabled;
+        # otherwise ARM CPU defaults to the W4A8 TLE-raw path below.
+        int8_enabled = os.environ.get("FL_CPU_INT8", "0").lower()
+        if int8_enabled not in {"0", "1", "false", "true"}:
+            raise ValueError("FL_CPU_INT8 must be one of: 0, 1, false, true")
+        if int8_enabled in {"1", "true"}:
             int8_backend = os.environ.get(
                 "FL_CPU_INT8_BACKEND", "kleidiai"
             ).lower()
