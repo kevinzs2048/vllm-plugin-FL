@@ -26,16 +26,16 @@ import triton.language as tl
 from torch.library import triton_op, wrap_triton
 from triton.language.core import _unwrap_if_constexpr, builtin
 from triton.language.extra.cpu import neon
+from vllm_fl.ops.cpu_quant_tle import ensure_tle_backend
 
 logger = logging.getLogger("vllm_fl.cpu_int8_tleraw")
 STATS = {"int8_linears": 0}
 INCLUDE_LM_HEAD = os.environ.get("FL_INT8_LMHEAD", "0") == "1"
 STRICT = os.environ.get("FL_CPU_INT8_STRICT", "1") != "0"
-TLE_CACHE_ABI = 20260720
+TLE_CACHE_ABI = 20260802
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _WRAPPER_SOURCE = _HERE / "cpu_int8_tle_wrapper.c"
-_UKERNEL_OBJECT = _HERE / "libkai_w8a8_ukernels.o"
 _PACK_LIBRARY = _HERE / "libkai_w8a8.so"
 _TLE_SYMBOL = "sdot_gemm_q4_0_v2_smmla_bf16"
 _REGISTERED = False
@@ -63,14 +63,17 @@ def _validate_cpu_features() -> None:
 
 _validate_cpu_features()
 
-for _path in (_WRAPPER_SOURCE, _UKERNEL_OBJECT, _PACK_LIBRARY):
+for _path in (_WRAPPER_SOURCE, _PACK_LIBRARY):
     if not _path.is_file():
         raise FileNotFoundError(
             f"Required ARM int8 TLE asset is missing: {_path}; "
             "run tools/build_arm_int8_assets.sh"
         )
 
-_PACK = ctypes.CDLL(str(_PACK_LIBRARY))
+# The shared library also exports the KleidiAI compute symbols referenced by
+# the TLE backing C source. RTLD_GLOBAL lets the generated kernel DSO resolve
+# them without linking a second, duplicate-symbol-prone relocatable object.
+_PACK = ctypes.CDLL(str(_PACK_LIBRARY), mode=ctypes.RTLD_GLOBAL)
 _PACK.fl_w8a8_rhs_packed_size.restype = ctypes.c_size_t
 _PACK.fl_w8a8_rhs_packed_size.argtypes = [ctypes.c_size_t] * 2
 _PACK.fl_w8a8_pack_rhs.argtypes = [ctypes.c_size_t] * 2 + [ctypes.c_void_p] * 3
@@ -93,28 +96,21 @@ def _quantize_pack(weight):
 
 
 def _register_tle_w8a8() -> None:
-    """Register the W8A8 backing symbol and link its KleidiAI ukernels."""
+    """Register the W8A8 backing symbol for the process-wide TLE ABI."""
     global _REGISTERED
     if _REGISTERED:
         return
-    if triton.runtime.driver.active.get_current_target().backend != "cpu":
-        raise RuntimeError("FL ARM int8 TLE backend requires triton-cpu")
 
-    neon.register_c_function(
-        _TLE_SYMBOL,
-        _WRAPPER_SOURCE.read_text(encoding="utf-8"),
-        extra_cflags=["-funroll-loops"],
-    )
-    original_get_objects = neon.get_all_object_files
+    def register() -> None:
+        if triton.runtime.driver.active.get_current_target().backend != "cpu":
+            raise RuntimeError("FL ARM int8 TLE backend requires triton-cpu")
+        neon.register_c_function(
+            _TLE_SYMBOL,
+            _WRAPPER_SOURCE.read_text(encoding="utf-8"),
+            extra_cflags=["-funroll-loops"],
+        )
 
-    def get_all_object_files():
-        objects = original_get_objects()
-        object_path = str(_UKERNEL_OBJECT)
-        if object_path not in objects:
-            objects.append(object_path)
-        return objects
-
-    neon.get_all_object_files = get_all_object_files
+    ensure_tle_backend("w8a8", register)
     _REGISTERED = True
 
 
@@ -142,9 +138,6 @@ def gemm_w8a8_tle(
         _as_i64(K, _builder),
         _as_i64(N, _builder),
     )
-
-
-_register_tle_w8a8()
 
 
 _BUILTIN_IMPORT = "from vllm_fl.ops.cpu_int8_tleraw import gemm_w8a8_tle\n"
@@ -201,6 +194,7 @@ def linear_w8a8(
     N: int,
     K: int,
 ) -> torch.Tensor:
+    _register_tle_w8a8()
     x_bf16 = x.to(torch.bfloat16).reshape(-1, K).contiguous()
     M = x_bf16.shape[0]
     out = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
@@ -240,6 +234,7 @@ def enable_int8(verbose=True):
 
     if getattr(layer_utils, "_fl_int8tle_enabled", False):
         return
+    _register_tle_w8a8()
     original_dispatch = layer_utils.dispatch_cpu_unquantized_gemm
 
     def dispatch(layer, remove_weight):
@@ -263,11 +258,6 @@ def enable_int8(verbose=True):
                         torch.empty(0), requires_grad=False
                     )
                 STATS["int8_linears"] += 1
-                try:
-                    with open("/tmp/fl_int8tle_marker.txt", "w") as f:
-                        f.write(f"int8_linears={STATS['int8_linears']}\n")
-                except OSError:
-                    pass
                 return
             except Exception as exc:
                 message = (

@@ -14,9 +14,10 @@ the native wrapper or KleidiAI object changes.
 
 ## Build the KleidiAI microkernels
 
-KleidiAI is not vendored here: the wheel ships only the two C sources this
-plugin owns, and stays platform-independent. Build ARM's microkernels once,
-from a FlagTree checkout:
+KleidiAI W4A8 code is not vendored here: the wheel ships only the two W4A8 C
+sources this plugin owns. The unified ARM wheel is nevertheless
+platform-specific because its W8A8 fallback library is packaged separately.
+Build the W4A8 microkernels once from a FlagTree checkout:
 
 ```bash
 bash python/scripts/build_kai_w4a8_assets.sh                      # clones KleidiAI

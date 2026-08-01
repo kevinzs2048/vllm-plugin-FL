@@ -27,11 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 def _is_arm_cpu() -> bool:
-    """Return whether this host is an ARM CPU.
-
-    int8 (纯官方 torchao) 栈不装 flag_gems,故不用 DeviceInfo/DeviceDetector 检测 vendor,
-    直接按机器架构判断——本机就是 AArch64 CPU,足以选中 CpuPlatformFL。
-    """
+    """Return whether the host architecture can use the FL CPU platform."""
     return platform.machine().lower() in {"aarch64", "arm64"}
 
 
@@ -154,14 +150,14 @@ def register_model():
     """Register FL-specific models not yet upstream."""
     from vllm.platforms import current_platform
     if current_platform.device_type == "cpu" and _is_arm_cpu():
-        # W8A8 dynamic quantization has priority when explicitly enabled;
-        # otherwise ARM CPU defaults to the W4A8 TLE-raw path below.
+        # INT8 modes have priority when explicitly enabled. KleidiAI/TLE-raw
+        # are W8A8 dynamic; torchpack is the torch-native W8A16 fallback.
         int8_enabled = os.environ.get("FL_CPU_INT8", "0").lower()
         if int8_enabled not in {"0", "1", "false", "true"}:
             raise ValueError("FL_CPU_INT8 must be one of: 0, 1, false, true")
         if int8_enabled in {"1", "true"}:
             int8_backend = os.environ.get(
-                "FL_CPU_INT8_BACKEND", "kleidiai"
+                "FL_CPU_INT8_BACKEND", "tleraw"
             ).lower()
             if int8_backend == "tleraw":
                 from vllm_fl.ops.cpu_int8_tleraw import enable_int8

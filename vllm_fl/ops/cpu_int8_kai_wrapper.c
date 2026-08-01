@@ -32,14 +32,14 @@ static void *grow(void **buf, size_t *cap, size_t need) {
 }
 
 static void *lhs_scratch(size_t need) {
-    static void *buf = NULL;
-    static size_t cap = 0;
+    static _Thread_local void *buf = NULL;
+    static _Thread_local size_t cap = 0;
     return grow(&buf, &cap, need);
 }
 
 static void *dst_scratch(size_t need) {
-    static void *buf = NULL;
-    static size_t cap = 0;
+    static _Thread_local void *buf = NULL;
+    static _Thread_local size_t cap = 0;
     return grow(&buf, &cap, need);
 }
 
@@ -47,6 +47,11 @@ static inline void f32_to_bf16_row(const float *src, uint16_t *dst, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         uint32_t bits;
         memcpy(&bits, &src[i], sizeof(bits));
+        if ((bits & 0x7f800000u) == 0x7f800000u &&
+            (bits & 0x007fffffu)) {
+            dst[i] = (uint16_t)((bits >> 16) | 0x0040u);
+            continue;
+        }
         bits += 0x7FFFu + ((bits >> 16) & 1u); /* round to nearest even */
         dst[i] = (uint16_t)(bits >> 16);
     }

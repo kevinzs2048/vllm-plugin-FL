@@ -2,7 +2,7 @@
 
 ## KleidiAI
 
-The ARM W8A8 runtime assets in this repository contain code built from
+The ARM W8A8 runtime library in this repository contains code built from
 KleidiAI. The W4A8 runtime links against a separately built KleidiAI object.
 
 - Copyright 2025 Arm Limited and/or its affiliates

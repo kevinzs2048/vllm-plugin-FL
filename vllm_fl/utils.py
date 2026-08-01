@@ -4,8 +4,8 @@ import json
 import os
 from typing import Optional, Tuple
 
-# int8 (纯官方 torchao) 栈不装 flag_gems;只用 CpuPlatformFL 平台优化,不走 int4 TLE。
-# flag_gems 缺失时降级为 None,运行时用到它的函数(int4/GPU 路径)在 int8 场景不会被调用。
+# ARM CPU quantized backends do not require FlagGems. Keep it optional so the
+# native CPU platform can load without pulling in accelerator dispatch code.
 try:
     import flag_gems
     try:

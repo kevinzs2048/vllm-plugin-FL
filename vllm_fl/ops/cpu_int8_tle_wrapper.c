@@ -6,7 +6,8 @@
  * Here rhs is a KleidiAI qsi8cxp4x8 packed int8 weight blob: decode (m==1)
  * runs the 1x4 NEON dotprod GEMV, prefill (m>1) the 16x4 NEON i8mm GEMM.
  * Kernels emit f32; rows are converted to bf16 in the writing thread.
- * KleidiAI ukernels are linked from libkai_w8a8_ukernels.o.
+ * KleidiAI ukernel symbols are resolved from the process-global
+ * libkai_w8a8.so loaded by cpu_int8_tleraw.py.
  */
 #if defined(__aarch64__)
 #include <float.h>
@@ -57,10 +58,10 @@ void kai_run_lhs_quant_pack_qai8dxp_bf16_neon(
     size_t m_idx_start, const void *lhs, size_t lhs_stride,
     void *lhs_packed);
 
-static uint8_t *w8a8_lhs_scratch;
-static size_t w8a8_lhs_capacity;
-static float *w8a8_dst_scratch;
-static size_t w8a8_dst_capacity;
+static _Thread_local uint8_t *w8a8_lhs_scratch;
+static _Thread_local size_t w8a8_lhs_capacity;
+static _Thread_local float *w8a8_dst_scratch;
+static _Thread_local size_t w8a8_dst_capacity;
 
 static void *reserve(uint8_t **buf, size_t *cap, size_t size) {
     if (size <= *cap) {
@@ -79,6 +80,11 @@ static inline void f32_to_bf16_row(const float *src, uint16_t *dst, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         uint32_t bits;
         memcpy(&bits, &src[i], sizeof(bits));
+        if ((bits & 0x7f800000u) == 0x7f800000u &&
+            (bits & 0x007fffffu)) {
+            dst[i] = (uint16_t)((bits >> 16) | 0x0040u);
+            continue;
+        }
         bits += 0x7FFFu + ((bits >> 16) & 1u);
         dst[i] = (uint16_t)(bits >> 16);
     }

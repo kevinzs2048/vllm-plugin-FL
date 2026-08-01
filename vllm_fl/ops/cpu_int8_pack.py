@@ -10,9 +10,10 @@ Pure official torch op — no third-party kernel, no TLE, no flag_gems/triton.
 Weights are quantized online (per-row symmetric int8) when the model loads, so
 no torchao checkpoint is required; the original BF16 model is used directly.
 
-Installed by register_model() when FL_CPU_INT8=1, hooking vLLM's
-``dispatch_cpu_unquantized_gemm`` (same mechanism as the int4 backend).  Runs
-under CpuPlatformFL (uniproc + active-wait + inductor).
+Installed by register_model() when ``FL_CPU_INT8=1`` and
+``FL_CPU_INT8_BACKEND=torchpack``, hooking vLLM's
+``dispatch_cpu_unquantized_gemm`` (same mechanism as the other quantized CPU
+backends).  Runs under CpuPlatformFL.
 """
 import logging
 import os
@@ -76,11 +77,6 @@ def enable_int8(verbose=True):
                         torch.empty(0), requires_grad=False
                     )
                 STATS["int8_linears"] += 1
-                try:
-                    with open("/tmp/fl_int8_marker.txt", "w") as f:
-                        f.write(f"int8_linears={STATS['int8_linears']}\n")
-                except OSError:
-                    pass
                 return
             except Exception as exc:
                 message = (

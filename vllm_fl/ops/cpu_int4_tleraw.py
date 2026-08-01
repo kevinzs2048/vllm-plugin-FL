@@ -18,6 +18,7 @@ import triton.language as tl
 from torch.library import triton_op, wrap_triton
 from triton.language.core import _unwrap_if_constexpr, builtin
 from triton.language.extra.cpu import neon
+from vllm_fl.ops.cpu_quant_tle import ensure_tle_backend
 from vllm_fl.patches.dynamo_metrics import patch_dynamo_metrics_serialization
 
 logger = logging.getLogger("vllm_fl.cpu_int4_tleraw")
@@ -27,7 +28,7 @@ STRICT = os.environ.get("FL_CPU_INT4_STRICT", "1") != "0"
 BL = 32
 # Triton/Inductor does not hash registered external C sources or linked object
 # contents.  Bump this date-style ABI whenever either native asset changes.
-TLE_CACHE_ABI = 20260717
+TLE_CACHE_ABI = 20260802
 
 _HERE = pathlib.Path(__file__).resolve().parent
 # Our own sources; the KleidiAI microkernels they call are built separately.
@@ -211,26 +212,31 @@ def _register_tle_w4a8() -> None:
     global _REGISTERED
     if _REGISTERED:
         return
-    if triton.runtime.driver.active.get_current_target().backend != "cpu":
-        raise RuntimeError("FL ARM int4 TLE backend requires triton-cpu")
-    if not _WRAPPER_SOURCE.is_file():
-        raise FileNotFoundError(f"Required ARM int4 TLE source is missing: {_WRAPPER_SOURCE}")
-    ukernel_object = str(_ukernel_object())
 
-    neon.register_c_function(
-        _TLE_SYMBOL,
-        _WRAPPER_SOURCE.read_text(encoding="utf-8"),
-        extra_cflags=["-funroll-loops"],
-    )
-    original_get_objects = neon.get_all_object_files
+    def register() -> None:
+        if triton.runtime.driver.active.get_current_target().backend != "cpu":
+            raise RuntimeError("FL ARM int4 TLE backend requires triton-cpu")
+        if not _WRAPPER_SOURCE.is_file():
+            raise FileNotFoundError(
+                f"Required ARM int4 TLE source is missing: {_WRAPPER_SOURCE}"
+            )
+        ukernel_object = str(_ukernel_object())
+        neon.register_c_function(
+            _TLE_SYMBOL,
+            _WRAPPER_SOURCE.read_text(encoding="utf-8"),
+            extra_cflags=["-funroll-loops"],
+        )
+        original_get_objects = neon.get_all_object_files
 
-    def get_all_object_files():
-        objects = original_get_objects()
-        if ukernel_object not in objects:
-            objects.append(ukernel_object)
-        return objects
+        def get_all_object_files():
+            objects = original_get_objects()
+            if ukernel_object not in objects:
+                objects.append(ukernel_object)
+            return objects
 
-    neon.get_all_object_files = get_all_object_files
+        neon.get_all_object_files = get_all_object_files
+
+    ensure_tle_backend("w4a8", register)
     _REGISTERED = True
 
 
@@ -258,9 +264,6 @@ def gemm_w4a8_i8mm(
         _as_i64(K, _builder),
         _as_i64(N, _builder),
     )
-
-
-_register_tle_w4a8()
 
 
 _BUILTIN_IMPORT = (
@@ -317,6 +320,7 @@ def linear_w4a8(
     N: int,
     K: int,
 ) -> torch.Tensor:
+    _register_tle_w4a8()
     x_bf16 = x.to(torch.bfloat16).reshape(-1, K).contiguous()
     M = x_bf16.shape[0]
     out = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
@@ -356,6 +360,7 @@ def enable_int4(verbose=True):
 
     if getattr(layer_utils, "_fl_tleraw_int4_enabled", False):
         return
+    _register_tle_w4a8()
     original_dispatch = layer_utils.dispatch_cpu_unquantized_gemm
 
     def dispatch(layer, remove_weight):
@@ -397,11 +402,12 @@ def enable_int4(verbose=True):
     layer_utils.dispatch_cpu_unquantized_gemm = dispatch
     layer_utils._fl_tleraw_int4_enabled = True
     if verbose:
-        print(
+        logger.info(
             "[vllm_fl] CPU int4 TLE-raw enabled "
-            "(decode=dotprod, prefill=i8mm)",
-            flush=True,
+            "(decode=dotprod, prefill=i8mm)"
         )
+
+
 def stats():
     return dict(STATS)
 

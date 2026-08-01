@@ -23,6 +23,7 @@ from shutil import which
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+from setuptools.command.build_py import build_py
 from setuptools.dist import Distribution
 
 ROOT_DIR = Path(__file__).parent.resolve()
@@ -47,11 +48,9 @@ ARM_CPU_PACKAGE_FILES = (
     "cpu_int8_kai_wrapper.c",
     "cpu_int8_tle_wrapper.c",
     "libkai_w8a8.so",
-    "libkai_w8a8_ukernels.o",
 )
 ARM_NATIVE_PACKAGE_FILES = (
     "libkai_w8a8.so",
-    "libkai_w8a8_ukernels.o",
 )
 ARM_NATIVE_ASSETS = tuple(
     ROOT_DIR / "vllm_fl/ops" / filename for filename in ARM_NATIVE_PACKAGE_FILES
@@ -191,6 +190,16 @@ class CMakeBuildExt(build_ext):
             shutil.copy2(built_ext, dest_path)
 
 
+class CleanBuildPy(build_py):
+    """Prevent deleted package files from leaking out of a reused build tree."""
+
+    def run(self) -> None:
+        package_build_dir = Path(self.build_lib) / "vllm_fl"
+        if package_build_dir.is_dir():
+            shutil.rmtree(package_build_dir)
+        super().run()
+
+
 class PlatformDistribution(Distribution):
     """Mark wheels carrying prebuilt AArch64 W8A8 assets as native."""
 
@@ -215,7 +224,10 @@ if VLLM_VENDOR:
 
 setup(
     ext_modules=ext_modules,
-    cmdclass={"build_ext": CMakeBuildExt} if ext_modules else {},
+    cmdclass={
+        "build_py": CleanBuildPy,
+        **({"build_ext": CMakeBuildExt} if ext_modules else {}),
+    },
     distclass=PlatformDistribution,
     package_data={"vllm_fl.ops": ARM_CPU_PACKAGE_FILES} if IS_ARM64 else {},
     exclude_package_data={"vllm_fl.ops": ARM_CPU_PACKAGE_FILES}

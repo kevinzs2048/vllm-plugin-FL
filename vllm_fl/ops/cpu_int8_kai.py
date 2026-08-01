@@ -3,8 +3,8 @@
 Per-row symmetric int8 weights (packed once at load, qsi8cxp4x8) with dynamic
 per-row int8 activations (qai8dxp, packed inside the C wrapper each call).
 Decode (M=1) runs the 1x4 NEON dotprod GEMV; prefill (M>1) the 16x4 NEON i8mm
-GEMM.  ~2.7x faster than torch._weight_int8pack_mm on this SoC because the
-hand-tuned asm streams the int8 weights at near memory bandwidth.
+GEMM.  The hand-tuned kernels keep packed int8 weights in their native layout
+and avoid materializing a dequantized weight tensor on the inference path.
 
 The ctypes call is wrapped in an opaque torch.library.custom_op so vLLM's
 DYNAMO_TRACE_ONCE + Inductor graph treats it as a black box (the proven
@@ -108,11 +108,6 @@ def enable_int8(verbose=True):
                         torch.empty(0), requires_grad=False
                     )
                 STATS["int8_linears"] += 1
-                try:
-                    with open("/tmp/fl_int8kai_marker.txt", "w") as f:
-                        f.write(f"int8_linears={STATS['int8_linears']}\n")
-                except OSError:
-                    pass
                 return
             except Exception as exc:
                 message = (

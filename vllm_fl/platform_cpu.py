@@ -1,5 +1,5 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
-"""ARM CPU platform for the FL TLE-raw W4A8 integration.
+"""ARM CPU platform for the FL quantized linear integrations.
 
 vllm-plugin-FL has no CPU vendor/backend (its PlatformFL/WorkerFL are GPU-shaped, adapted
 from vLLM v0.20.2 CUDA). On ARM CPU we register this subclass so the plugin provides a CPU
@@ -13,8 +13,8 @@ The native CPU platform requires its MP executor to configure OpenMP correctly. 
 FL_CPU_UNIPROC=1 escape hatch keeps the measured in-process path available for controlled,
 single-worker deployments that configure thread affinity and allocator preload themselves.
 
-The KleidiAI int4 op is installed via register_model() (runs in whichever process loads the
-model). Net effect: plugin-driven int4 on 0.20.2 matches the native/manual int4 performance.
+The selected W4A8 or W8 backend is installed via register_model(), which runs
+in whichever process loads the model.
 """
 import os
 
@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 
 
 class CpuPlatformFL(CpuPlatform):
-    """Native vLLM CPU platform with compile enabled for ARM TLE-raw W4A8."""
+    """Native vLLM CPU platform with compile enabled for ARM quantization."""
 
     @classmethod
     def check_and_update_config(cls, vllm_config) -> None:

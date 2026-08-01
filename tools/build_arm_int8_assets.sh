@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build libkai_w8a8.so: KleidiAI qai8dxp x qsi8cxp ukernels + FL wrapper.
-# usage: build_arm_int8_assets.sh [KLEIDIAI_ROOT]
+# Build the sole packaged W8A8 native asset: KleidiAI ukernels + FL wrapper.
+# usage: build_arm_int8_assets.sh [KLEIDIAI_ROOT] [OUTPUT_DIR]
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -11,6 +11,8 @@ if [[ -z ${KLEIDIAI_ROOT} || ! -d ${KLEIDIAI_ROOT}/kai ]]; then
     echo "pass a KleidiAI source root or set KLEIDIAI_ROOT" >&2
     exit 1
 fi
+OUTPUT_DIR=${2:-${FL_KAI_W8A8_OUTPUT_DIR:-${OPS_DIR}}}
+mkdir -p "${OUTPUT_DIR}"
 
 CFLAGS=(-O3 -fPIC -fopenmp -march=armv8.6-a+bf16+i8mm+dotprod -I"${KLEIDIAI_ROOT}")
 MATMUL_DIR="${KLEIDIAI_ROOT}/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi8cxp"
@@ -24,5 +26,8 @@ SRCS=(
     "${OPS_DIR}/cpu_int8_kai_wrapper.c"
 )
 
-gcc "${CFLAGS[@]}" -shared -o "${OPS_DIR}/libkai_w8a8.so" "${SRCS[@]}" -lm
-echo "built ${OPS_DIR}/libkai_w8a8.so"
+gcc "${CFLAGS[@]}" -shared -o "${OUTPUT_DIR}/libkai_w8a8.so" "${SRCS[@]}" -lm
+echo "built ${OUTPUT_DIR}/libkai_w8a8.so"
+if git -C "${KLEIDIAI_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
+    echo "KleidiAI revision: $(git -C "${KLEIDIAI_ROOT}" rev-parse HEAD)"
+fi
