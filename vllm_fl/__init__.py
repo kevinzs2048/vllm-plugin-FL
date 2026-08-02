@@ -1,8 +1,8 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
 
+import importlib.util
 import logging
 import os
-import pathlib
 import platform
 import sys
 from importlib import metadata
@@ -43,17 +43,13 @@ def _is_arm_cpu_build() -> bool:
 
 
 def _w4a8_assets_configured() -> bool:
-    """Return whether the external W4A8 runtime inputs are usable."""
-    kai_dir = os.environ.get("FL_KAI_W4A8_DIR", "")
-    if not kai_dir or not (
-        pathlib.Path(kai_dir) / "libkai_w4a8_ukernels.o"
-    ).is_file():
+    """Return whether FlagTree ships its source-built W4A8 runtime."""
+    try:
+        return importlib.util.find_spec(
+            "triton.language.extra.cpu.kleidiai"
+        ) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
         return False
-    pack_library = os.environ.get("FL_KAI_W4A8_PACK_SO", "")
-    if pack_library:
-        return pathlib.Path(pack_library).is_file()
-    kleidiai_root = os.environ.get("KLEIDIAI_ROOT", "")
-    return bool(kleidiai_root) and (pathlib.Path(kleidiai_root) / "kai").is_dir()
 
 
 def __getattr__(name):

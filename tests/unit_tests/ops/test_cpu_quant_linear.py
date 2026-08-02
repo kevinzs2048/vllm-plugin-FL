@@ -2,8 +2,6 @@
 
 import logging
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import torch
@@ -154,20 +152,6 @@ class TestCpuQuantLinearInstaller(unittest.TestCase):
                 )
             self.assertIsNone(cpu_quant_linear._ACTIVE_BACKEND)
             self.assertIs(layer_utils.dispatch_cpu_unquantized_gemm, original)
-
-    def test_native_asset_cache_abi_tracks_content(self):
-        from vllm_fl.ops.cpu_quant_linear import native_asset_cache_abi
-
-        with TemporaryDirectory() as directory:
-            asset = Path(directory) / "native.o"
-            asset.write_bytes(b"first")
-            first = native_asset_cache_abi(asset)
-            self.assertGreater(first, 0)
-            self.assertEqual(first, native_asset_cache_abi(asset))
-
-            asset.write_bytes(b"second")
-            self.assertNotEqual(first, native_asset_cache_abi(asset))
-
 
 if __name__ == "__main__":
     unittest.main()

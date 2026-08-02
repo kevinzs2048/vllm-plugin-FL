@@ -1,6 +1,0 @@
-include THIRD_PARTY_NOTICES.md
-include vllm_fl/ops/cpu_int4_pack.c
-include vllm_fl/ops/cpu_int4_tle_wrapper.c
-include vllm_fl/ops/cpu_int8_kai_wrapper.c
-include vllm_fl/ops/cpu_int8_tle_wrapper.c
-include vllm_fl/ops/libkai_w8a8.so

@@ -2,51 +2,34 @@
 
 The FL plugin uses a FlagTree TLE-raw W4A8 operator on AArch64 CPUs with
 dot-product, i8mm, and BF16 extensions. Runtime
-linear computation enters `create_cpu_gemm_q4_0_v2_smmla_bf16`; its compiled C
-backing selects KleidiAI dot-product GEMV for decode (`M == 1`) and i8mm GEMM
+linear computation enters `create_cpu_kleidiai_w4a8_linear`; FlagTree's
+source-built runtime selects KleidiAI dot-product GEMV for decode (`M == 1`) and i8mm GEMM
 for prefill (`M > 1`). Python does not dispatch on `M`, because vLLM CPU's
 `DYNAMO_TRACE_ONCE` graph is reused after shape guards are removed.
 
 The generated kernel specialization includes a cache identity derived from the
-native wrapper and KleidiAI object contents. Triton CPU does not hash those
-assets itself, so the plugin supplies the content-derived identity automatically.
+FlagTree runtime source and compiler identity, so stale Triton kernels are not
+reused after the native implementation changes.
 
-## Build the KleidiAI microkernels
+## Native source ownership and build
 
-KleidiAI W4A8 code is not vendored here: the wheel ships only the two W4A8 C
-sources this plugin owns. The unified ARM wheel is nevertheless
-platform-specific because its W8A8 runtime library is packaged separately.
-Build the W4A8 microkernels once from a FlagTree checkout:
+The vLLM plugin does not contain KleidiAI source, C wrappers, object files, or
+shared libraries. `flagtree-cpu` carries the pinned minimal KleidiAI subset,
+license, revision, integration wrappers, and deterministic build rule. On first
+use it compiles a content-addressed runtime under
+`~/.cache/triton/kleidiai/`; later processes reuse that cache.
 
-```bash
-bash python/scripts/build_kai_w4a8_assets.sh                      # clones KleidiAI
-bash python/scripts/build_kai_w4a8_assets.sh --kleidiai-path DIR   # or reuse a clone
-```
-
-The script prints the two variables to export:
-
-```bash
-export FL_KAI_W4A8_DIR=...   # holds libkai_w4a8_ukernels.o
-export KLEIDIAI_ROOT=...     # KleidiAI source root (headers)
-```
-
-`FL_KAI_W4A8_DIR` supplies the relocatable object appended to every compiled
-Triton kernel's link line. `KLEIDIAI_ROOT` is needed only the first time the
-plugin runs: it compiles `cpu_int4_pack.c` against the KleidiAI headers into a
-small shared library, cached under `~/.cache/flagos-kai-w4a8/`, and loads it
-through `ctypes` to pack weights at model-load time. That library is not on the
-inference path. Set `FL_KAI_W4A8_PACK_SO` to supply a prebuilt one instead.
-
-KleidiAI is Apache-2.0, Copyright Arm Limited; obtaining it is the deployer's
-responsibility.
+No `FL_KAI_W4A8_DIR`, `KLEIDIAI_ROOT`, or prebuilt `.so` is required. A C
+compiler is required because Triton CPU already compiles host kernels at
+runtime. `TRITON_KLEIDIAI_CACHE_DIR` may override the native cache directory.
 
 ## Run
 
 Enable the plugin with `VLLM_PLUGINS=fl`. Compile mode is on by default. INT4 is
-selected automatically when the W4A8 assets described above are configured;
-otherwise the clean-install default remains BF16. The relevant controls are:
+selected automatically when the installed FlagTree CPU package provides the
+runtime sources; otherwise the clean-install default remains BF16. The relevant controls are:
 
-- `FL_CPU_INT4=1`: require INT4; missing or invalid assets are a hard error.
+- `FL_CPU_INT4=1`: require INT4; missing or invalid FlagTree support is a hard error.
 - `FL_CPU_INT4=0`: retain the ARM CPU platform but use BF16 linears.
 - `FL_CPU_INT4_BACKEND=tleraw`: the only supported INT4 runtime backend.
 - `FL_INT4_LMHEAD=1`: include a compatible language-model head; off by default.

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import pathlib
 import platform
@@ -35,18 +34,6 @@ def require_arm_quant_extensions(backend: str) -> None:
             f"{backend} requires dotprod, i8mm, and BF16 CPU extensions; "
             f"missing: {', '.join(sorted(missing))}"
         )
-
-
-def native_asset_cache_abi(*paths: pathlib.Path) -> int:
-    """Return a stable positive int64 cache identity for native assets."""
-    digest = hashlib.sha256()
-    for path in paths:
-        digest.update(path.name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    identity = int.from_bytes(digest.digest()[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
-    return identity or 1
 
 
 def install_cpu_quantized_linear(

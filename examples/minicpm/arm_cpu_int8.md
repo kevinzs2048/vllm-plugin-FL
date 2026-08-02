@@ -5,7 +5,7 @@ on AArch64 CPUs with dot-product, i8mm, and BF16 extensions:
 
 - `tleraw` (default): FlagTree TLE-raw operator backed by KleidiAI. Decode
   (`M == 1`) uses dot-product GEMV and prefill (`M > 1`) uses i8mm GEMM.
-- `kleidiai`: calls the same packaged KleidiAI kernels through a ctypes custom
+- `kleidiai`: calls the same FlagTree-built KleidiAI runtime through a ctypes custom
   op. This is useful when TLE compilation is unavailable.
 - `torchpack`: uses `torch._weight_int8pack_mm`; activations remain BF16, so
   this mode is W8A16 rather than W8A8.
@@ -13,28 +13,17 @@ on AArch64 CPUs with dot-product, i8mm, and BF16 extensions:
 Weights are quantized online from the BF16 checkpoint and packed once during
 model loading. The inference path does not materialize BF16 weights.
 
-## Build the packaged W8A8 library
+## Native source ownership and build
 
-The AArch64 wheel contains `vllm_fl/ops/libkai_w8a8.so`. Rebuild it whenever
-`cpu_int8_kai_wrapper.c` or the selected KleidiAI revision changes:
+The vLLM plugin contains no native binary or copied KleidiAI source.
+`flagtree-cpu` carries the pinned source subset, Apache-2.0 license, exact
+upstream revision, integration wrapper, and build rule. On first use FlagTree
+builds a content-addressed shared library under
+`~/.cache/triton/kleidiai/`; subsequent workers reuse it.
 
-```bash
-bash tools/build_arm_int8_assets.sh /path/to/kleidiai
-```
-
-To build into a staging directory without modifying the package tree:
-
-```bash
-bash tools/build_arm_int8_assets.sh /path/to/kleidiai /tmp/fl-w8-assets
-```
-
-The script prints the KleidiAI Git revision. Record that revision when the
-library is refreshed. The current packaged library was built from
-`a2abc4d3fb4669dcd30bcad8cd6fd4c232f64924`.
-
-`libkai_w8a8.so` is the only packaged native W8A8 asset. The generated TLE
-kernel resolves its KleidiAI compute symbols from this process-global shared
-library; no separate relocatable ukernel object is required.
+No external KleidiAI checkout or prebuilt `.so` is required. A C compiler is
+required because Triton CPU already compiles host kernels at runtime.
+`TRITON_KLEIDIAI_CACHE_DIR` may override the native cache directory.
 
 ## Run
 
@@ -52,7 +41,5 @@ Controls:
 - `FL_CPU_INT8_STRICT=0`: fall back to BF16 if packing an eligible linear
   fails; strict failure is the default.
 
-W4A8 and W8A8 TLE currently lower through the same compiler symbol with
-different packed-weight layouts. Both modules can be imported together, but a
-single process may activate only one of them. Restart the worker to switch
-between W4A8 and W8A8.
+W4A8 and W8A8 have separate compiler ops and runtime symbols. Both modules can
+be imported and executed in one process without sharing a packed-weight ABI.

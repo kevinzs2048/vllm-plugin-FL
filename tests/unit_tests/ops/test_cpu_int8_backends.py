@@ -23,12 +23,16 @@ class TestCpuInt8Backends(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
         env["OMP_NUM_THREADS"] = "2"
+        # GNU as on this target does not accept LLVM's two-string .file form.
+        env["TRITON_DISABLE_LINE_INFO"] = "1"
         with (
             tempfile.TemporaryDirectory(prefix="fl-triton-cache-") as triton_cache,
             tempfile.TemporaryDirectory(prefix="fl-inductor-cache-") as inductor_cache,
+            tempfile.TemporaryDirectory(prefix="fl-kleidiai-cache-") as kai_cache,
         ):
             env["TRITON_CACHE_DIR"] = triton_cache
             env["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
+            env["TRITON_KLEIDIAI_CACHE_DIR"] = kai_cache
             result = subprocess.run(
                 [sys.executable, "-c", code],
                 cwd=REPO_ROOT,
@@ -102,11 +106,13 @@ class TestCpuInt8Backends(unittest.TestCase):
             )
             self.assertLess(float(relative_error), 0.02)
 
-    def test_w8_library_exports_only_plugin_abi(self):
+    def test_w8_library_exports_only_flagtree_abi(self):
         nm = shutil.which("nm")
         if nm is None:
             self.skipTest("nm is required for the native ABI check")
-        library = REPO_ROOT / "vllm_fl/ops/libkai_w8a8.so"
+        from triton.language.extra.cpu import kleidiai
+
+        library = kleidiai.build_runtime("w8a8")
         result = subprocess.run(
             [nm, "-D", "--defined-only", str(library)],
             check=True,
@@ -121,18 +127,13 @@ class TestCpuInt8Backends(unittest.TestCase):
         self.assertEqual(
             exported,
             {
-                "fl_w8a8_linear",
-                "fl_w8a8_pack_rhs",
-                "fl_w8a8_rhs_packed_size",
+                "flagtree_kai_w8a8_linear",
+                "flagtree_kai_w8a8_pack_rhs",
+                "flagtree_kai_w8a8_rhs_packed_size",
             },
         )
 
-    def test_importing_both_tle_modules_does_not_poison_selected_backend(self):
-        kai_dir = os.environ.get("FL_KAI_W4A8_DIR")
-        kleidiai_root = os.environ.get("KLEIDIAI_ROOT")
-        if not kai_dir or not kleidiai_root:
-            self.skipTest("FL_KAI_W4A8_DIR and KLEIDIAI_ROOT are required")
-
+    def test_w4_and_w8_tle_modules_can_execute_in_one_process(self):
         code = r'''
 import torch
 from vllm_fl.ops import cpu_int4_tleraw as w4
@@ -153,12 +154,14 @@ expected = x.float() @ dequant.T
 relative_error = torch.linalg.vector_norm(actual - expected) / torch.linalg.vector_norm(expected)
 assert float(relative_error) < 0.015, float(relative_error)
 
-try:
-    w8._register_tle_w8a8()
-except RuntimeError as exc:
-    assert "already active as w4a8" in str(exc), str(exc)
-else:
-    raise AssertionError("activating a second packed TLE ABI should fail")
+w8_weight = torch.randn(n, k, dtype=torch.bfloat16)
+w8_scale = (w8_weight.float().abs().amax(dim=1) / 127.0).clamp(min=1e-8)
+w8_quantized = (w8_weight.float() / w8_scale[:, None]).round().clamp(-128, 127)
+w8_packed = w8._quantize_pack(w8_weight)
+w8_actual = w8.linear_w8a8(x, w8_packed, n, k).float()
+w8_expected = x.float() @ (w8_quantized * w8_scale[:, None]).T
+w8_error = torch.linalg.vector_norm(w8_actual - w8_expected) / torch.linalg.vector_norm(w8_expected)
+assert float(w8_error) < 0.02, float(w8_error)
 '''
         self.run_in_fresh_cache(code)
 

@@ -14,9 +14,9 @@ the original BF16 checkpoint — no torchao checkpoint needed.
 import ctypes
 import logging
 import os
-import pathlib
 
 import torch
+from triton.language.extra.cpu import kleidiai
 
 from vllm_fl.ops.cpu_quant_linear import (
     install_cpu_quantized_linear,
@@ -27,18 +27,19 @@ logger = logging.getLogger("vllm_fl.cpu_int8_kai")
 INCLUDE_LM_HEAD = os.environ.get("FL_INT8_LMHEAD", "0") == "1"
 STRICT = os.environ.get("FL_CPU_INT8_STRICT", "1") != "0"
 
-_HERE = pathlib.Path(__file__).resolve().parent
-_LIB_PATH = _HERE / "libkai_w8a8.so"
 require_arm_quant_extensions("FL ARM W8A8 KleidiAI backend")
-if not _LIB_PATH.is_file():
-    raise FileNotFoundError(
-        f"missing {_LIB_PATH}; run tools/build_arm_int8_assets.sh"
-    )
-_LIB = ctypes.CDLL(str(_LIB_PATH))
-_LIB.fl_w8a8_rhs_packed_size.restype = ctypes.c_size_t
-_LIB.fl_w8a8_rhs_packed_size.argtypes = [ctypes.c_size_t] * 2
-_LIB.fl_w8a8_pack_rhs.argtypes = [ctypes.c_size_t] * 2 + [ctypes.c_void_p] * 3
-_LIB.fl_w8a8_linear.argtypes = [ctypes.c_size_t] * 3 + [ctypes.c_void_p] * 3
+_LIB_PATH = kleidiai.build_runtime("w8a8")
+_LIB = ctypes.CDLL(str(_LIB_PATH), mode=ctypes.RTLD_GLOBAL)
+_LIB.flagtree_kai_w8a8_rhs_packed_size.restype = ctypes.c_size_t
+_LIB.flagtree_kai_w8a8_rhs_packed_size.argtypes = [ctypes.c_size_t] * 2
+_LIB.flagtree_kai_w8a8_pack_rhs.restype = None
+_LIB.flagtree_kai_w8a8_pack_rhs.argtypes = (
+    [ctypes.c_size_t] * 2 + [ctypes.c_void_p] * 3
+)
+_LIB.flagtree_kai_w8a8_linear.restype = None
+_LIB.flagtree_kai_w8a8_linear.argtypes = (
+    [ctypes.c_void_p] * 3 + [ctypes.c_int64] * 3
+)
 
 
 def _ptr(tensor):
@@ -53,9 +54,11 @@ def _quantize_pack(weight):
     qw = (w / scale[:, None]).round().clamp(-128, 127).to(torch.int8).contiguous()
     scale_f32 = scale.to(torch.float32).contiguous()
     packed = torch.empty(
-        _LIB.fl_w8a8_rhs_packed_size(N, K), dtype=torch.uint8
+        _LIB.flagtree_kai_w8a8_rhs_packed_size(N, K), dtype=torch.uint8
     )
-    _LIB.fl_w8a8_pack_rhs(N, K, _ptr(qw), _ptr(scale_f32), _ptr(packed))
+    _LIB.flagtree_kai_w8a8_pack_rhs(
+        N, K, _ptr(qw), _ptr(scale_f32), _ptr(packed)
+    )
     return packed
 
 
@@ -64,7 +67,9 @@ def linear_w8a8(x: torch.Tensor, packed: torch.Tensor, N: int, K: int) -> torch.
     x_bf16 = x.to(torch.bfloat16).reshape(-1, K).contiguous()
     M = x_bf16.shape[0]
     out = torch.empty((M, N), dtype=torch.bfloat16)
-    _LIB.fl_w8a8_linear(M, N, K, _ptr(x_bf16), _ptr(packed), _ptr(out))
+    _LIB.flagtree_kai_w8a8_linear(
+        _ptr(x_bf16), _ptr(packed), _ptr(out), M, K, N
+    )
     return out.reshape(*x.shape[:-1], N)
 
 

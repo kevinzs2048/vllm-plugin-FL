@@ -14,7 +14,6 @@ from __future__ import annotations
 import glob
 import logging
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -22,7 +21,6 @@ from pathlib import Path
 from shutil import which
 
 from setuptools import Extension, setup
-from setuptools.command.bdist_wheel import bdist_wheel
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 
@@ -36,27 +34,6 @@ CMAKE_BUILD_TYPE = os.environ.get("CMAKE_BUILD_TYPE")
 VERBOSE = os.environ.get("VERBOSE", "0") == "1"
 
 SUPPORTED_VENDORS = ("cuda",)
-IS_ARM64 = platform.machine().lower() in {"aarch64", "arm64"}
-
-# Runtime files for the unified ARM CPU W4A8/W8A8 implementation. W4A8 keeps
-# KleidiAI itself external and packages only its FL-owned C sources. The
-# current W8A8 implementation still carries its prebuilt AArch64 KleidiAI
-# assets, so ARM wheels containing them must be platform-specific.
-ARM_CPU_PACKAGE_FILES = (
-    "cpu_int4_pack.c",
-    "cpu_int4_tle_wrapper.c",
-    "cpu_int8_tle_wrapper.c",
-    "libkai_w8a8.so",
-)
-ARM_NATIVE_PACKAGE_FILES = (
-    "libkai_w8a8.so",
-)
-ARM_SDIST_ONLY_FILES = (
-    "cpu_int8_kai_wrapper.c",
-)
-ARM_NATIVE_ASSETS = tuple(
-    ROOT_DIR / "vllm_fl/ops" / filename for filename in ARM_NATIVE_PACKAGE_FILES
-)
 
 
 def _is_cuda() -> bool:
@@ -193,32 +170,13 @@ class CMakeBuildExt(build_ext):
 
 
 class CleanBuildPy(build_py):
-    """Prevent deleted package files from leaking out of a reused build tree."""
+    """Remove stale package files before copying the current source tree."""
 
     def run(self) -> None:
         package_build_dir = Path(self.build_lib) / "vllm_fl"
         if package_build_dir.is_dir():
             shutil.rmtree(package_build_dir)
         super().run()
-
-
-def _has_arm_native_assets() -> bool:
-    return IS_ARM64 and all(path.is_file() for path in ARM_NATIVE_ASSETS)
-
-
-class PlatformWheel(bdist_wheel):
-    """Tag the Python-independent AArch64 runtime as a platform wheel."""
-
-    def finalize_options(self) -> None:
-        super().finalize_options()
-        if _has_arm_native_assets() and not self.distribution.ext_modules:
-            self.root_is_pure = False
-
-    def get_tag(self) -> tuple[str, str, str]:
-        python_tag, abi_tag, platform_tag = super().get_tag()
-        if _has_arm_native_assets() and not self.distribution.ext_modules:
-            return "py3", "none", platform_tag
-        return python_tag, abi_tag, platform_tag
 
 
 ext_modules = []
@@ -236,14 +194,7 @@ if VLLM_VENDOR:
 setup(
     ext_modules=ext_modules,
     cmdclass={
-        "bdist_wheel": PlatformWheel,
         "build_py": CleanBuildPy,
         **({"build_ext": CMakeBuildExt} if ext_modules else {}),
-    },
-    package_data={"vllm_fl.ops": ARM_CPU_PACKAGE_FILES} if IS_ARM64 else {},
-    exclude_package_data={
-        "vllm_fl.ops": ARM_SDIST_ONLY_FILES
-        if IS_ARM64
-        else ARM_CPU_PACKAGE_FILES + ARM_SDIST_ONLY_FILES
     },
 )
