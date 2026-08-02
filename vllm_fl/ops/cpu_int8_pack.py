@@ -21,7 +21,6 @@ import os
 import torch
 
 logger = logging.getLogger("vllm_fl.cpu_int8_pack")
-STATS = {"int8_linears": 0}
 INCLUDE_LM_HEAD = os.environ.get("FL_INT8_LMHEAD", "0") == "1"
 STRICT = os.environ.get("FL_CPU_INT8_STRICT", "1") != "0"
 
@@ -76,7 +75,6 @@ def enable_int8(verbose=True):
                     layer.weight = torch.nn.Parameter(
                         torch.empty(0), requires_grad=False
                     )
-                STATS["int8_linears"] += 1
                 return
             except Exception as exc:
                 message = (
@@ -94,7 +92,3 @@ def enable_int8(verbose=True):
         logger.info(
             "[vllm_fl] ARM int8 W8A16 enabled (torch _weight_int8pack_mm, fused)"
         )
-
-
-def stats():
-    return dict(STATS)

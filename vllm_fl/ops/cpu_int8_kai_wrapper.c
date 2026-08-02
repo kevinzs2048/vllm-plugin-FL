@@ -24,8 +24,12 @@
 
 static void *grow(void **buf, size_t *cap, size_t need) {
     if (*cap < need) {
+        void *next = aligned_alloc(64, (need + 63) & ~(size_t)63);
+        if (next == NULL) {
+            abort();
+        }
         free(*buf);
-        *buf = aligned_alloc(64, (need + 63) & ~(size_t)63);
+        *buf = next;
         *cap = need;
     }
     return *buf;

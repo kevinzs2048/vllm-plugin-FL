@@ -27,7 +27,3 @@ def ensure_tle_backend(name: str, register: Callable[[], None]) -> None:
             )
         register()
         _ACTIVE_BACKEND = name
-
-
-def active_tle_backend() -> str | None:
-    return _ACTIVE_BACKEND

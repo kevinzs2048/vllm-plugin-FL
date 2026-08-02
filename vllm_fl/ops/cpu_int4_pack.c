@@ -79,12 +79,6 @@ void fl_w4a8_profile_record_v2(size_t m, size_t n, size_t k,
     unlock_profile();
 }
 
-/* ABI compatibility for Triton DSOs cached before profile records gained M. */
-void fl_w4a8_profile_record(size_t n, size_t k,
-                            uint64_t lhs_pack_ns, uint64_t gemv_ns) {
-    fl_w4a8_profile_record_v2(1, n, k, lhs_pack_ns, gemv_ns);
-}
-
 void fl_w4a8_profile_reset(void) {
     lock_profile();
     memset(profile_entries, 0, sizeof(profile_entries));

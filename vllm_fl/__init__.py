@@ -4,6 +4,7 @@ import os
 import logging
 import platform
 import sys
+from importlib import metadata
 
 # torch.float4_e2m1fn_x2 exists only in CUDA builds of PyTorch 2.7+.
 # vllm.ir.tolerances references it at module level, so we inject a sentinel
@@ -26,9 +27,18 @@ from . import version as version  # PyTorch-style: vllm_fl.version.git_version
 logger = logging.getLogger(__name__)
 
 
-def _is_arm_cpu() -> bool:
-    """Return whether the host architecture can use the FL CPU platform."""
-    return platform.machine().lower() in {"aarch64", "arm64"}
+def _is_arm_cpu_build() -> bool:
+    """Return whether this is an AArch64 vLLM CPU build.
+
+    Architecture alone is insufficient: accelerator-enabled vLLM wheels also
+    run on AArch64 hosts and must retain the original FL platform.
+    """
+    if platform.machine().lower() not in {"aarch64", "arm64"}:
+        return False
+    try:
+        return "cpu" in metadata.version("vllm").lower()
+    except metadata.PackageNotFoundError:
+        return os.environ.get("VLLM_TARGET_DEVICE", "").lower() == "cpu"
 
 
 def __getattr__(name):
@@ -103,7 +113,7 @@ def register():
     """Register the FL platform."""
     # PlatformFL is accelerator-shaped. ARM CPU uses vLLM's native CPU platform
     # plus the FL TLE-raw W4A8 integration installed by register_model().
-    if _is_arm_cpu():
+    if _is_arm_cpu_build():
         logger.info("[vllm_fl] ARM CPU -> FL CPU platform (native-backed)")
         return "vllm_fl.platform_cpu.CpuPlatformFL"
 
@@ -149,7 +159,7 @@ def register_router():
 def register_model():
     """Register FL-specific models not yet upstream."""
     from vllm.platforms import current_platform
-    if current_platform.device_type == "cpu" and _is_arm_cpu():
+    if current_platform.device_type == "cpu" and _is_arm_cpu_build():
         # INT8 modes have priority when explicitly enabled. KleidiAI/TLE-raw
         # are W8A8 dynamic; torchpack is the torch-native W8A16 fallback.
         int8_enabled = os.environ.get("FL_CPU_INT8", "0").lower()

@@ -19,7 +19,6 @@ import pathlib
 import torch
 
 logger = logging.getLogger("vllm_fl.cpu_int8_kai")
-STATS = {"int8_linears": 0}
 INCLUDE_LM_HEAD = os.environ.get("FL_INT8_LMHEAD", "0") == "1"
 STRICT = os.environ.get("FL_CPU_INT8_STRICT", "1") != "0"
 
@@ -107,7 +106,6 @@ def enable_int8(verbose=True):
                     layer.weight = torch.nn.Parameter(
                         torch.empty(0), requires_grad=False
                     )
-                STATS["int8_linears"] += 1
                 return
             except Exception as exc:
                 message = (
@@ -123,7 +121,3 @@ def enable_int8(verbose=True):
     layer_utils._fl_int8kai_enabled = True
     if verbose:
         logger.info("[vllm_fl] ARM W8A8 enabled (KleidiAI dotprod/i8mm)")
-
-
-def stats():
-    return dict(STATS)

@@ -16,7 +16,7 @@ the native wrapper or KleidiAI object changes.
 
 KleidiAI W4A8 code is not vendored here: the wheel ships only the two W4A8 C
 sources this plugin owns. The unified ARM wheel is nevertheless
-platform-specific because its W8A8 fallback library is packaged separately.
+platform-specific because its W8A8 runtime library is packaged separately.
 Build the W4A8 microkernels once from a FlagTree checkout:
 
 ```bash

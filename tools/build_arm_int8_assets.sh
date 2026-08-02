@@ -13,6 +13,7 @@ if [[ -z ${KLEIDIAI_ROOT} || ! -d ${KLEIDIAI_ROOT}/kai ]]; then
 fi
 OUTPUT_DIR=${2:-${FL_KAI_W8A8_OUTPUT_DIR:-${OPS_DIR}}}
 mkdir -p "${OUTPUT_DIR}"
+CC=${CC:-gcc}
 
 CFLAGS=(-O3 -fPIC -fopenmp -march=armv8.6-a+bf16+i8mm+dotprod -I"${KLEIDIAI_ROOT}")
 MATMUL_DIR="${KLEIDIAI_ROOT}/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi8cxp"
@@ -26,7 +27,13 @@ SRCS=(
     "${OPS_DIR}/cpu_int8_kai_wrapper.c"
 )
 
-gcc "${CFLAGS[@]}" -shared -o "${OUTPUT_DIR}/libkai_w8a8.so" "${SRCS[@]}" -lm
+OUTPUT_LIBRARY="${OUTPUT_DIR}/libkai_w8a8.so"
+TEMP_LIBRARY=$(mktemp "${OUTPUT_DIR}/.libkai_w8a8.so.XXXXXX")
+trap 'rm -f "${TEMP_LIBRARY}"' EXIT
+"${CC}" "${CFLAGS[@]}" -shared -o "${TEMP_LIBRARY}" "${SRCS[@]}" -lm
+chmod 0755 "${TEMP_LIBRARY}"
+mv "${TEMP_LIBRARY}" "${OUTPUT_LIBRARY}"
+trap - EXIT
 echo "built ${OUTPUT_DIR}/libkai_w8a8.so"
 if git -C "${KLEIDIAI_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
     echo "KleidiAI revision: $(git -C "${KLEIDIAI_ROOT}" rev-parse HEAD)"

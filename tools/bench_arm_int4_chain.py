@@ -47,11 +47,11 @@ def main() -> None:
             * 1e6
         )
     result = {
-                "median_us_per_linear": statistics.median(samples),
-                "samples_us_per_linear": samples,
-                "gomp_spincount": os.environ.get("GOMP_SPINCOUNT", "default"),
-                "omp_wait_policy": os.environ.get("OMP_WAIT_POLICY", "default"),
-            }
+        "median_us_per_linear": statistics.median(samples),
+        "samples_us_per_linear": samples,
+        "gomp_spincount": os.environ.get("GOMP_SPINCOUNT", "default"),
+        "omp_wait_policy": os.environ.get("OMP_WAIT_POLICY", "default"),
+    }
     if os.environ.get("FL_W4A8_PROFILE") == "1":
         result["w4a8_profile"] = int4.profile_stats()
     print(json.dumps(result, sort_keys=True))

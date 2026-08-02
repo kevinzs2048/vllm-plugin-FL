@@ -27,12 +27,12 @@ from torch.library import triton_op, wrap_triton
 from triton.language.core import _unwrap_if_constexpr, builtin
 from triton.language.extra.cpu import neon
 from vllm_fl.ops.cpu_quant_tle import ensure_tle_backend
+from vllm_fl.patches.dynamo_metrics import patch_dynamo_metrics_serialization
 
 logger = logging.getLogger("vllm_fl.cpu_int8_tleraw")
-STATS = {"int8_linears": 0}
 INCLUDE_LM_HEAD = os.environ.get("FL_INT8_LMHEAD", "0") == "1"
 STRICT = os.environ.get("FL_CPU_INT8_STRICT", "1") != "0"
-TLE_CACHE_ABI = 20260802
+TLE_CACHE_ABI = 2026080201
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _WRAPPER_SOURCE = _HERE / "cpu_int8_tle_wrapper.c"
@@ -163,8 +163,6 @@ def _patch_inductor_builtin_import() -> None:
     async_compile.AsyncCompile._fl_w8a8_builtin_patched = True
 
 
-from vllm_fl.patches.dynamo_metrics import patch_dynamo_metrics_serialization
-
 patch_dynamo_metrics_serialization()
 _patch_inductor_builtin_import()
 
@@ -257,7 +255,6 @@ def enable_int8(verbose=True):
                     layer.weight = torch.nn.Parameter(
                         torch.empty(0), requires_grad=False
                     )
-                STATS["int8_linears"] += 1
                 return
             except Exception as exc:
                 message = (
@@ -275,7 +272,3 @@ def enable_int8(verbose=True):
         logger.info(
             "[vllm_fl] ARM W8A8 enabled (FlagTree TLE-raw op, KleidiAI backing)"
         )
-
-
-def stats():
-    return dict(STATS)
