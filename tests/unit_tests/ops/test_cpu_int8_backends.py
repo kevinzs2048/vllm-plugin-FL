@@ -2,6 +2,7 @@
 
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -63,6 +64,68 @@ class TestCpuInt8Backends(unittest.TestCase):
                 outputs = list(pool.map(run, (0, 1)))
                 for actual, expected in zip(outputs, references):
                     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_kleidiai_matches_dequantized_reference(self):
+        from vllm_fl.ops import cpu_int8_kai as op
+
+        torch.manual_seed(20260803)
+        n, k = 64, 128
+        weight = torch.randn(n, k, dtype=torch.bfloat16)
+        scale = (weight.float().abs().amax(dim=1) / 127.0).clamp(min=1e-8)
+        quantized = (weight.float() / scale[:, None]).round().clamp(-128, 127)
+        dequantized = quantized * scale[:, None]
+        packed = op._quantize_pack(weight)
+        for m in (1, 3, 7):
+            x = torch.randn(m, k, dtype=torch.bfloat16)
+            actual = op.linear_w8a8(x, packed, n, k).float()
+            expected = x.float() @ dequantized.T
+            relative_error = torch.linalg.vector_norm(actual - expected) / (
+                torch.linalg.vector_norm(expected) + 1e-12
+            )
+            self.assertLess(float(relative_error), 0.02)
+
+    def test_torchpack_matches_dequantized_reference(self):
+        from vllm_fl.ops import cpu_int8_pack as op
+
+        torch.manual_seed(20260804)
+        n, k = 64, 128
+        weight = torch.randn(n, k, dtype=torch.bfloat16)
+        quantized, scale = op._quantize_int8(weight)
+        linear = op._make_cpu_linear(quantized, scale, n, k)
+        dequantized = quantized.float() * scale.float()[:, None]
+        for m in (1, 3, 7):
+            x = torch.randn(m, k, dtype=torch.bfloat16)
+            actual = linear(x, weight, None).float()
+            expected = x.float() @ dequantized.T
+            relative_error = torch.linalg.vector_norm(actual - expected) / (
+                torch.linalg.vector_norm(expected) + 1e-12
+            )
+            self.assertLess(float(relative_error), 0.02)
+
+    def test_w8_library_exports_only_plugin_abi(self):
+        nm = shutil.which("nm")
+        if nm is None:
+            self.skipTest("nm is required for the native ABI check")
+        library = REPO_ROOT / "vllm_fl/ops/libkai_w8a8.so"
+        result = subprocess.run(
+            [nm, "-D", "--defined-only", str(library)],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        exported = {
+            line.split()[-1]
+            for line in result.stdout.splitlines()
+            if line.split()
+        }
+        self.assertEqual(
+            exported,
+            {
+                "fl_w8a8_linear",
+                "fl_w8a8_pack_rhs",
+                "fl_w8a8_rhs_packed_size",
+            },
+        )
 
     def test_importing_both_tle_modules_does_not_poison_selected_backend(self):
         kai_dir = os.environ.get("FL_KAI_W4A8_DIR")

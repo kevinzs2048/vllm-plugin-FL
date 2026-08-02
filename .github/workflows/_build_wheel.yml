@@ -66,3 +66,72 @@ jobs:
         with:
           name: wheel
           path: dist/*.whl
+
+  build-arm:
+    name: Build Check (AArch64)
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build ARM package
+        run: python -m build --wheel
+
+      - name: Verify ARM wheel tag and native assets
+        run: |
+          python - <<'PY'
+          import pathlib
+          import zipfile
+
+          wheels = list(pathlib.Path("dist").glob("*.whl"))
+          assert len(wheels) == 1, wheels
+          wheel = wheels[0]
+          assert wheel.name.endswith("-py3-none-linux_aarch64.whl"), wheel.name
+          with zipfile.ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+          required = {
+              "cpu_quant_linear.py",
+              "cpu_int4_pack.c",
+              "cpu_int4_tle_wrapper.c",
+              "cpu_int8_tle_wrapper.c",
+              "libkai_w8a8.so",
+          }
+          packaged = {pathlib.PurePosixPath(name).name for name in names}
+          assert required <= packaged, required - packaged
+          assert "cpu_int8_kai_wrapper.c" not in packaged
+          assert not any(name.endswith(".o") for name in names)
+          PY
+          pip install --no-deps dist/*.whl
+          python - <<'PY'
+          import ctypes
+          from importlib.metadata import files
+
+          library = next(
+              path.locate()
+              for path in files("vllm-plugin-fl")
+              if str(path).endswith("vllm_fl/ops/libkai_w8a8.so")
+          )
+          runtime = ctypes.CDLL(str(library))
+          for symbol in (
+              "fl_w8a8_linear",
+              "fl_w8a8_pack_rhs",
+              "fl_w8a8_rhs_packed_size",
+          ):
+              getattr(runtime, symbol)
+          PY
+
+      - name: Upload ARM wheel
+        if: inputs.upload-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-arm64
+          path: dist/*.whl

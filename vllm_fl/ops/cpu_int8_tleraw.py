@@ -18,7 +18,6 @@ import ctypes
 import logging
 import os
 import pathlib
-import platform
 
 import torch
 import triton
@@ -26,13 +25,20 @@ import triton.language as tl
 from torch.library import triton_op, wrap_triton
 from triton.language.core import _unwrap_if_constexpr, builtin
 from triton.language.extra.cpu import neon
-from vllm_fl.ops.cpu_quant_tle import ensure_tle_backend
+from vllm_fl.ops.cpu_quant_linear import (
+    install_cpu_quantized_linear,
+    native_asset_cache_abi,
+    require_arm_quant_extensions,
+)
+from vllm_fl.ops.cpu_quant_tle import (
+    ensure_tle_backend,
+    register_inductor_builtin_import,
+)
 from vllm_fl.patches.dynamo_metrics import patch_dynamo_metrics_serialization
 
 logger = logging.getLogger("vllm_fl.cpu_int8_tleraw")
 INCLUDE_LM_HEAD = os.environ.get("FL_INT8_LMHEAD", "0") == "1"
 STRICT = os.environ.get("FL_CPU_INT8_STRICT", "1") != "0"
-TLE_CACHE_ABI = 2026080201
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _WRAPPER_SOURCE = _HERE / "cpu_int8_tle_wrapper.c"
@@ -41,27 +47,7 @@ _TLE_SYMBOL = "sdot_gemm_q4_0_v2_smmla_bf16"
 _REGISTERED = False
 
 
-def _validate_cpu_features() -> None:
-    if platform.machine().lower() not in {"aarch64", "arm64"}:
-        raise RuntimeError("FL ARM int8 TLE backend requires AArch64")
-    cpuinfo = pathlib.Path("/proc/cpuinfo")
-    if not cpuinfo.is_file():
-        return
-    feature_sets = []
-    for line in cpuinfo.read_text(encoding="utf-8").splitlines():
-        if line.lower().startswith("features"):
-            feature_sets.append(set(line.partition(":")[2].split()))
-    features = set.intersection(*feature_sets) if feature_sets else set()
-    required = {"asimddp", "i8mm", "bf16"}
-    missing = required - features
-    if missing:
-        raise RuntimeError(
-            "FL ARM int8 requires dotprod, i8mm, and BF16 CPU extensions; "
-            f"missing: {', '.join(sorted(missing))}"
-        )
-
-
-_validate_cpu_features()
+require_arm_quant_extensions("FL ARM W8A8 TLE backend")
 
 for _path in (_WRAPPER_SOURCE, _PACK_LIBRARY):
     if not _path.is_file():
@@ -70,9 +56,10 @@ for _path in (_WRAPPER_SOURCE, _PACK_LIBRARY):
             "run tools/build_arm_int8_assets.sh"
         )
 
-# The shared library also exports the KleidiAI compute symbols referenced by
-# the TLE backing C source. RTLD_GLOBAL lets the generated kernel DSO resolve
-# them without linking a second, duplicate-symbol-prone relocatable object.
+TLE_CACHE_ABI = native_asset_cache_abi(_WRAPPER_SOURCE, _PACK_LIBRARY)
+
+# The generated TLE kernel DSO resolves the narrow fl_w8a8_linear ABI from this
+# process-global library. Internal KleidiAI symbols are hidden at link time.
 _PACK = ctypes.CDLL(str(_PACK_LIBRARY), mode=ctypes.RTLD_GLOBAL)
 _PACK.fl_w8a8_rhs_packed_size.restype = ctypes.c_size_t
 _PACK.fl_w8a8_rhs_packed_size.argtypes = [ctypes.c_size_t] * 2
@@ -143,28 +130,8 @@ def gemm_w8a8_tle(
 _BUILTIN_IMPORT = "from vllm_fl.ops.cpu_int8_tleraw import gemm_w8a8_tle\n"
 
 
-def _patch_inductor_builtin_import() -> None:
-    """Teach Inductor-generated Triton source about the custom TLE builtin."""
-    import torch._inductor.async_compile as async_compile
-
-    if getattr(async_compile.AsyncCompile, "_fl_w8a8_builtin_patched", False):
-        return
-    original_triton = async_compile.AsyncCompile.triton
-
-    def compile_triton(self, kernel_name, source_code, device_str="cpu"):
-        if (
-            "gemm_w8a8_tle(" in source_code
-            and _BUILTIN_IMPORT.strip() not in source_code
-        ):
-            source_code = _BUILTIN_IMPORT + source_code
-        return original_triton(self, kernel_name, source_code, device_str)
-
-    async_compile.AsyncCompile.triton = compile_triton
-    async_compile.AsyncCompile._fl_w8a8_builtin_patched = True
-
-
 patch_dynamo_metrics_serialization()
-_patch_inductor_builtin_import()
+register_inductor_builtin_import("gemm_w8a8_tle(", _BUILTIN_IMPORT)
 
 
 @triton.jit
@@ -223,52 +190,22 @@ def _make_cpu_linear(rhs, N, K):
     return cpu_linear
 
 
+def _prepare_linear(weight):
+    N, K = weight.shape
+    return _make_cpu_linear(_quantize_pack(weight), N, K)
+
+
 def enable_int8(verbose=True):
-    import vllm.model_executor.layers.utils as layer_utils
-    from vllm.model_executor.layers.vocab_parallel_embedding import (
-        ParallelLMHead,
-        VocabParallelEmbedding,
+    installed = install_cpu_quantized_linear(
+        backend="ARM W8A8 TLE",
+        prepare_linear=_prepare_linear,
+        supports_shape=lambda n, k: k % 8 == 0,
+        include_lm_head=INCLUDE_LM_HEAD,
+        strict=STRICT,
+        logger=logger,
+        initialize=_register_tle_w8a8,
     )
-
-    if getattr(layer_utils, "_fl_int8tle_enabled", False):
-        return
-    _register_tle_w8a8()
-    original_dispatch = layer_utils.dispatch_cpu_unquantized_gemm
-
-    def dispatch(layer, remove_weight):
-        weight = getattr(layer, "weight", None)
-        prefix = getattr(layer, "prefix", "") or ""
-        is_lm_head = isinstance(layer, ParallelLMHead)
-        is_input_embedding = type(layer) is VocabParallelEmbedding
-        if (
-            weight is not None
-            and weight.ndim == 2
-            and weight.shape[1] % 8 == 0
-            and not is_input_embedding
-            and (INCLUDE_LM_HEAD or not is_lm_head)
-        ):
-            try:
-                N, K = weight.shape
-                packed = _quantize_pack(weight)
-                layer.cpu_linear = _make_cpu_linear(packed, N, K)
-                if remove_weight:
-                    layer.weight = torch.nn.Parameter(
-                        torch.empty(0), requires_grad=False
-                    )
-                return
-            except Exception as exc:
-                message = (
-                    f"failed to prepare ARM W8A8 TLE weight {prefix} "
-                    f"{tuple(weight.shape)}"
-                )
-                if STRICT:
-                    raise RuntimeError(message) from exc
-                logger.warning("%s; falling back to BF16: %s", message, exc)
-        return original_dispatch(layer, remove_weight)
-
-    layer_utils.dispatch_cpu_unquantized_gemm = dispatch
-    layer_utils._fl_int8tle_enabled = True
-    if verbose:
+    if installed and verbose:
         logger.info(
             "[vllm_fl] ARM W8A8 enabled (FlagTree TLE-raw op, KleidiAI backing)"
         )

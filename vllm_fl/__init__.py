@@ -1,7 +1,8 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
 
-import os
 import logging
+import os
+import pathlib
 import platform
 import sys
 from importlib import metadata
@@ -39,6 +40,20 @@ def _is_arm_cpu_build() -> bool:
         return "cpu" in metadata.version("vllm").lower()
     except metadata.PackageNotFoundError:
         return os.environ.get("VLLM_TARGET_DEVICE", "").lower() == "cpu"
+
+
+def _w4a8_assets_configured() -> bool:
+    """Return whether the external W4A8 runtime inputs are usable."""
+    kai_dir = os.environ.get("FL_KAI_W4A8_DIR", "")
+    if not kai_dir or not (
+        pathlib.Path(kai_dir) / "libkai_w4a8_ukernels.o"
+    ).is_file():
+        return False
+    pack_library = os.environ.get("FL_KAI_W4A8_PACK_SO", "")
+    if pack_library:
+        return pathlib.Path(pack_library).is_file()
+    kleidiai_root = os.environ.get("KLEIDIAI_ROOT", "")
+    return bool(kleidiai_root) and (pathlib.Path(kleidiai_root) / "kai").is_dir()
 
 
 def __getattr__(name):
@@ -182,9 +197,18 @@ def register_model():
 
             enable_int8()
             return
-        enabled = os.environ.get("FL_CPU_INT4", "1").lower()
-        if enabled not in {"0", "1", "false", "true"}:
-            raise ValueError("FL_CPU_INT4 must be one of: 0, 1, false, true")
+        int4_setting = os.environ.get("FL_CPU_INT4")
+        if int4_setting is None:
+            enabled = "1" if _w4a8_assets_configured() else "0"
+            if enabled == "0":
+                logger.info(
+                    "[vllm_fl] W4A8 assets are not configured -> bf16; "
+                    "set FL_CPU_INT4=1 for strict activation"
+                )
+        else:
+            enabled = int4_setting.lower()
+            if enabled not in {"0", "1", "false", "true"}:
+                raise ValueError("FL_CPU_INT4 must be one of: 0, 1, false, true")
         if enabled in {"1", "true"}:
             backend = os.environ.get("FL_CPU_INT4_BACKEND", "tleraw").lower()
             if backend != "tleraw":

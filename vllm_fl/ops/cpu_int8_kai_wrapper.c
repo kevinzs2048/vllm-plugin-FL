@@ -17,6 +17,12 @@
 #include "kai/ukernels/matmul/pack/kai_lhs_quant_pack_qai8dxp_bf16_neon.h"
 #include "kai/ukernels/matmul/pack/kai_rhs_pack_nxk_qsi8cxp_qsi8cx_neon.h"
 
+#if defined(__GNUC__)
+#define FL_EXPORT __attribute__((visibility("default")))
+#else
+#define FL_EXPORT
+#endif
+
 #define VGET(sym) kai_get_##sym##_matmul_clamp_f32_qai8dxp1x8_qsi8cxp4x8_1x4_neon_dotprod
 #define VRun kai_run_matmul_clamp_f32_qai8dxp1x8_qsi8cxp4x8_1x4_neon_dotprod
 #define MGET(sym) kai_get_##sym##_matmul_clamp_f32_qai8dxp4x8_qsi8cxp4x8_16x4_neon_i8mm
@@ -61,13 +67,13 @@ static inline void f32_to_bf16_row(const float *src, uint16_t *dst, size_t n) {
     }
 }
 
-size_t fl_w8a8_rhs_packed_size(size_t n, size_t k) {
+FL_EXPORT size_t fl_w8a8_rhs_packed_size(size_t n, size_t k) {
     return kai_get_rhs_packed_size_rhs_pack_nxk_qsi8cxp_qsi8cx_neon(
         n, k, MGET(nr)(), MGET(kr)(), MGET(sr)());
 }
 
-void fl_w8a8_pack_rhs(size_t n, size_t k, const int8_t *rhs_nxk,
-                      const float *scale_n, void *rhs_packed) {
+FL_EXPORT void fl_w8a8_pack_rhs(size_t n, size_t k, const int8_t *rhs_nxk,
+                                const float *scale_n, void *rhs_packed) {
     struct kai_rhs_pack_qsi8cx_params params = {
         .lhs_zero_point = 1,
         .scale_multiplier = 1.0f,
@@ -166,8 +172,9 @@ static void run_gemm(const uint16_t *x, const void *rhs, uint16_t *out,
     }
 }
 
-void fl_w8a8_linear(size_t m, size_t n, size_t k, const uint16_t *x_bf16,
-                    const void *rhs_packed, uint16_t *out_bf16) {
+FL_EXPORT void fl_w8a8_linear(size_t m, size_t n, size_t k,
+                              const uint16_t *x_bf16,
+                              const void *rhs_packed, uint16_t *out_bf16) {
     if (m == 1) {
         run_gemv(x_bf16, rhs_packed, out_bf16, n, k);
     } else {

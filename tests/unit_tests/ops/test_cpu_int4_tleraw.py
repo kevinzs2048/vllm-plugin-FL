@@ -58,34 +58,3 @@ def test_compiled_prefill_graph_handles_decode_shape(int4_case):
         torch.manual_seed(200 + m)
         x = torch.randn(m, k, dtype=torch.bfloat16)
         torch.testing.assert_close(compiled(x), linear(x), rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("include_lm_head", [False, True])
-def test_lm_head_switch_uses_layer_type(monkeypatch, include_lm_head):
-    from vllm.model_executor.layers import utils as layer_utils
-    from vllm.model_executor.layers.vocab_parallel_embedding import (
-        ParallelLMHead,
-        VocabParallelEmbedding,
-    )
-    from vllm_fl.ops import cpu_int4_tleraw as int4
-
-    # Installs the patched dispatch this test exercises; idempotent.
-    int4.enable_int4(verbose=False)
-
-    def bare_layer(cls):
-        layer = object.__new__(cls)
-        torch.nn.Module.__init__(layer)
-        layer.weight = torch.nn.Parameter(
-            torch.randn(64, 128, dtype=torch.bfloat16),
-            requires_grad=False,
-        )
-        layer.bias = None
-        return layer
-
-    monkeypatch.setattr(int4, "INCLUDE_LM_HEAD", include_lm_head)
-    embedding = bare_layer(VocabParallelEmbedding)
-    lm_head = bare_layer(ParallelLMHead)
-    before = int4.stats()["int4_linears"]
-    layer_utils.dispatch_cpu_unquantized_gemm(embedding, remove_weight=False)
-    layer_utils.dispatch_cpu_unquantized_gemm(lm_head, remove_weight=False)
-    assert int4.stats()["int4_linears"] - before == int(include_lm_head)

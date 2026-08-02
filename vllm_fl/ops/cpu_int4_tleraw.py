@@ -10,7 +10,6 @@ import ctypes
 import logging
 import os
 import pathlib
-import platform
 
 import torch
 import triton
@@ -18,17 +17,21 @@ import triton.language as tl
 from torch.library import triton_op, wrap_triton
 from triton.language.core import _unwrap_if_constexpr, builtin
 from triton.language.extra.cpu import neon
-from vllm_fl.ops.cpu_quant_tle import ensure_tle_backend
+from vllm_fl.ops.cpu_quant_linear import (
+    install_cpu_quantized_linear,
+    native_asset_cache_abi,
+    require_arm_quant_extensions,
+)
+from vllm_fl.ops.cpu_quant_tle import (
+    ensure_tle_backend,
+    register_inductor_builtin_import,
+)
 from vllm_fl.patches.dynamo_metrics import patch_dynamo_metrics_serialization
 
 logger = logging.getLogger("vllm_fl.cpu_int4_tleraw")
-STATS = {"int4_linears": 0}
 INCLUDE_LM_HEAD = os.environ.get("FL_INT4_LMHEAD", "0") == "1"
 STRICT = os.environ.get("FL_CPU_INT4_STRICT", "1") != "0"
 BL = 32
-# Triton/Inductor does not hash registered external C sources or linked object
-# contents.  Bump this date-style ABI whenever either native asset changes.
-TLE_CACHE_ABI = 20260802
 
 _HERE = pathlib.Path(__file__).resolve().parent
 # Our own sources; the KleidiAI microkernels they call are built separately.
@@ -77,7 +80,7 @@ def _build_pack_library() -> pathlib.Path:
             raise FileNotFoundError(f"FL_KAI_W4A8_PACK_SO={path} does not exist")
         return path
 
-    ukernel = _ukernel_object()
+    ukernel = _UKERNEL_OBJECT
     if not _KLEIDIAI_ROOT:
         raise RuntimeError(
             f"KLEIDIAI_ROOT is not set (needed for the KleidiAI headers).\n{_BUILD_HINT}"
@@ -121,28 +124,9 @@ def _build_pack_library() -> pathlib.Path:
     return out
 
 
-def _validate_cpu_features() -> None:
-    if platform.machine().lower() not in {"aarch64", "arm64"}:
-        raise RuntimeError("FL ARM int4 TLE backend requires AArch64")
-    cpuinfo = pathlib.Path("/proc/cpuinfo")
-    if not cpuinfo.is_file():
-        return
-    feature_sets = []
-    for line in cpuinfo.read_text(encoding="utf-8").splitlines():
-        if line.lower().startswith("features"):
-            feature_sets.append(set(line.partition(":")[2].split()))
-    features = set.intersection(*feature_sets) if feature_sets else set()
-    required = {"asimddp", "i8mm", "bf16"}
-    missing = required - features
-    if missing:
-        raise RuntimeError(
-            "FL ARM int4 requires dotprod, i8mm, and BF16 CPU extensions; "
-            f"missing: {', '.join(sorted(missing))}"
-        )
-
-
-_validate_cpu_features()
-
+require_arm_quant_extensions("FL ARM W4A8 TLE backend")
+_UKERNEL_OBJECT = _ukernel_object()
+TLE_CACHE_ABI = native_asset_cache_abi(_WRAPPER_SOURCE, _UKERNEL_OBJECT)
 _PACK_LIBRARY = _build_pack_library()
 # RTLD_GLOBAL: the compiled TLE kernel resolves fl_w4a8_profile_record_v2 here
 # when FL_W4A8_PROFILE is enabled.
@@ -220,7 +204,7 @@ def _register_tle_w4a8() -> None:
             raise FileNotFoundError(
                 f"Required ARM int4 TLE source is missing: {_WRAPPER_SOURCE}"
             )
-        ukernel_object = str(_ukernel_object())
+        ukernel_object = str(_UKERNEL_OBJECT)
         neon.register_c_function(
             _TLE_SYMBOL,
             _WRAPPER_SOURCE.read_text(encoding="utf-8"),
@@ -271,28 +255,8 @@ _BUILTIN_IMPORT = (
 )
 
 
-def _patch_inductor_builtin_import() -> None:
-    """Teach Inductor-generated Triton source about the custom TLE builtin."""
-    import torch._inductor.async_compile as async_compile
-
-    if getattr(async_compile.AsyncCompile, "_fl_w4a8_builtin_patched", False):
-        return
-    original_triton = async_compile.AsyncCompile.triton
-
-    def compile_triton(self, kernel_name, source_code, device_str="cpu"):
-        if (
-            "gemm_w4a8_i8mm(" in source_code
-            and _BUILTIN_IMPORT.strip() not in source_code
-        ):
-            source_code = _BUILTIN_IMPORT + source_code
-        return original_triton(self, kernel_name, source_code, device_str)
-
-    async_compile.AsyncCompile.triton = compile_triton
-    async_compile.AsyncCompile._fl_w4a8_builtin_patched = True
-
-
 patch_dynamo_metrics_serialization()
-_patch_inductor_builtin_import()
+register_inductor_builtin_import("gemm_w4a8_i8mm(", _BUILTIN_IMPORT)
 
 
 @triton.jit
@@ -351,65 +315,29 @@ def _make_cpu_linear(rhs, N, K):
     return cpu_linear
 
 
-def enable_int4(verbose=True):
-    import vllm.model_executor.layers.utils as layer_utils
-    from vllm.model_executor.layers.vocab_parallel_embedding import (
-        ParallelLMHead,
-        VocabParallelEmbedding,
+def _prepare_linear(weight):
+    N, K = weight.shape
+    native, scales = quant_native_qs4c32(
+        weight.detach().to(torch.bfloat16), BL
     )
+    return _make_cpu_linear(_pack_rhs(native, scales, N, K), N, K)
 
-    if getattr(layer_utils, "_fl_tleraw_int4_enabled", False):
-        return
-    _register_tle_w4a8()
-    original_dispatch = layer_utils.dispatch_cpu_unquantized_gemm
 
-    def dispatch(layer, remove_weight):
-        weight = getattr(layer, "weight", None)
-        prefix = getattr(layer, "prefix", "") or ""
-        is_lm_head = isinstance(layer, ParallelLMHead)
-        is_input_embedding = type(layer) is VocabParallelEmbedding
-        if (
-            weight is not None
-            and weight.ndim == 2
-            and weight.shape[1] % BL == 0
-            and weight.shape[0] % 8 == 0
-            and not is_input_embedding
-            and (INCLUDE_LM_HEAD or not is_lm_head)
-        ):
-            try:
-                N, K = weight.shape
-                native, scales = quant_native_qs4c32(
-                    weight.detach().to(torch.bfloat16), BL
-                )
-                rhs = _pack_rhs(native, scales, N, K)
-                layer.cpu_linear = _make_cpu_linear(rhs, N, K)
-                if remove_weight:
-                    layer.weight = torch.nn.Parameter(
-                        torch.empty(0), requires_grad=False
-                    )
-                STATS["int4_linears"] += 1
-                return
-            except Exception as exc:
-                message = (
-                    f"failed to prepare ARM int4 TLE weight {prefix} "
-                    f"{tuple(weight.shape)}"
-                )
-                if STRICT:
-                    raise RuntimeError(message) from exc
-                logger.warning("%s; falling back to BF16: %s", message, exc)
-        return original_dispatch(layer, remove_weight)
-
-    layer_utils.dispatch_cpu_unquantized_gemm = dispatch
-    layer_utils._fl_tleraw_int4_enabled = True
-    if verbose:
+def enable_int4(verbose=True):
+    installed = install_cpu_quantized_linear(
+        backend="ARM W4A8 TLE",
+        prepare_linear=_prepare_linear,
+        supports_shape=lambda n, k: k % BL == 0 and n % 8 == 0,
+        include_lm_head=INCLUDE_LM_HEAD,
+        strict=STRICT,
+        logger=logger,
+        initialize=_register_tle_w4a8,
+    )
+    if installed and verbose:
         logger.info(
             "[vllm_fl] CPU int4 TLE-raw enabled "
             "(decode=dotprod, prefill=i8mm)"
         )
-
-
-def stats():
-    return dict(STATS)
 
 
 def profile_reset():

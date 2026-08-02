@@ -18,12 +18,18 @@ import pathlib
 
 import torch
 
+from vllm_fl.ops.cpu_quant_linear import (
+    install_cpu_quantized_linear,
+    require_arm_quant_extensions,
+)
+
 logger = logging.getLogger("vllm_fl.cpu_int8_kai")
 INCLUDE_LM_HEAD = os.environ.get("FL_INT8_LMHEAD", "0") == "1"
 STRICT = os.environ.get("FL_CPU_INT8_STRICT", "1") != "0"
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _LIB_PATH = _HERE / "libkai_w8a8.so"
+require_arm_quant_extensions("FL ARM W8A8 KleidiAI backend")
 if not _LIB_PATH.is_file():
     raise FileNotFoundError(
         f"missing {_LIB_PATH}; run tools/build_arm_int8_assets.sh"
@@ -75,49 +81,19 @@ def _make_cpu_linear(packed, N, K):
     return cpu_linear
 
 
+def _prepare_linear(weight):
+    N, K = weight.shape
+    return _make_cpu_linear(_quantize_pack(weight), N, K)
+
+
 def enable_int8(verbose=True):
-    import vllm.model_executor.layers.utils as layer_utils
-    from vllm.model_executor.layers.vocab_parallel_embedding import (
-        ParallelLMHead,
-        VocabParallelEmbedding,
+    installed = install_cpu_quantized_linear(
+        backend="ARM W8A8 KleidiAI",
+        prepare_linear=_prepare_linear,
+        supports_shape=lambda n, k: k % 8 == 0,
+        include_lm_head=INCLUDE_LM_HEAD,
+        strict=STRICT,
+        logger=logger,
     )
-
-    if getattr(layer_utils, "_fl_int8kai_enabled", False):
-        return
-    original_dispatch = layer_utils.dispatch_cpu_unquantized_gemm
-
-    def dispatch(layer, remove_weight):
-        weight = getattr(layer, "weight", None)
-        prefix = getattr(layer, "prefix", "") or ""
-        is_lm_head = isinstance(layer, ParallelLMHead)
-        is_input_embedding = type(layer) is VocabParallelEmbedding
-        if (
-            weight is not None
-            and weight.ndim == 2
-            and weight.shape[1] % 8 == 0  # kr alignment
-            and not is_input_embedding
-            and (INCLUDE_LM_HEAD or not is_lm_head)
-        ):
-            try:
-                N, K = weight.shape
-                packed = _quantize_pack(weight)
-                layer.cpu_linear = _make_cpu_linear(packed, N, K)
-                if remove_weight:
-                    layer.weight = torch.nn.Parameter(
-                        torch.empty(0), requires_grad=False
-                    )
-                return
-            except Exception as exc:
-                message = (
-                    f"failed to prepare ARM W8A8 weight {prefix} "
-                    f"{tuple(weight.shape)}"
-                )
-                if STRICT:
-                    raise RuntimeError(message) from exc
-                logger.warning("%s; falling back to BF16: %s", message, exc)
-        return original_dispatch(layer, remove_weight)
-
-    layer_utils.dispatch_cpu_unquantized_gemm = dispatch
-    layer_utils._fl_int8kai_enabled = True
-    if verbose:
+    if installed and verbose:
         logger.info("[vllm_fl] ARM W8A8 enabled (KleidiAI dotprod/i8mm)")

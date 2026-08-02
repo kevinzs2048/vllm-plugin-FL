@@ -7,10 +7,9 @@ backing selects KleidiAI dot-product GEMV for decode (`M == 1`) and i8mm GEMM
 for prefill (`M > 1`). Python does not dispatch on `M`, because vLLM CPU's
 `DYNAMO_TRACE_ONCE` graph is reused after shape guards are removed.
 
-`TLE_CACHE_ABI` in `cpu_int4_tleraw.py` is part of the generated kernel
-specialization. Triton CPU does not include registered external C source or
-linked object contents in its cache key, so this value must be bumped whenever
-the native wrapper or KleidiAI object changes.
+The generated kernel specialization includes a cache identity derived from the
+native wrapper and KleidiAI object contents. Triton CPU does not hash those
+assets itself, so the plugin supplies the content-derived identity automatically.
 
 ## Build the KleidiAI microkernels
 
@@ -43,9 +42,11 @@ responsibility.
 
 ## Run
 
-Enable the plugin with `VLLM_PLUGINS=fl`. ARM CPU INT4 and compile mode are on
-by default. The relevant controls are:
+Enable the plugin with `VLLM_PLUGINS=fl`. Compile mode is on by default. INT4 is
+selected automatically when the W4A8 assets described above are configured;
+otherwise the clean-install default remains BF16. The relevant controls are:
 
+- `FL_CPU_INT4=1`: require INT4; missing or invalid assets are a hard error.
 - `FL_CPU_INT4=0`: retain the ARM CPU platform but use BF16 linears.
 - `FL_CPU_INT4_BACKEND=tleraw`: the only supported INT4 runtime backend.
 - `FL_INT4_LMHEAD=1`: include a compatible language-model head; off by default.

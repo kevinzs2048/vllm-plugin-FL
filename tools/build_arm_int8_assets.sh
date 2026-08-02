@@ -15,7 +15,7 @@ OUTPUT_DIR=${2:-${FL_KAI_W8A8_OUTPUT_DIR:-${OPS_DIR}}}
 mkdir -p "${OUTPUT_DIR}"
 CC=${CC:-gcc}
 
-CFLAGS=(-O3 -fPIC -fopenmp -march=armv8.6-a+bf16+i8mm+dotprod -I"${KLEIDIAI_ROOT}")
+CFLAGS=(-O3 -fPIC -fvisibility=hidden -fopenmp -march=armv8.6-a+bf16+i8mm+dotprod -I"${KLEIDIAI_ROOT}")
 MATMUL_DIR="${KLEIDIAI_ROOT}/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi8cxp"
 PACK_DIR="${KLEIDIAI_ROOT}/kai/ukernels/matmul/pack"
 
