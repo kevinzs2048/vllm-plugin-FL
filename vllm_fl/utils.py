@@ -4,21 +4,43 @@ import json
 import os
 from typing import Optional, Tuple
 
-# ARM CPU quantized backends do not require FlagGems. Keep it optional so the
-# native CPU platform can load without pulling in accelerator dispatch code.
-try:
-    import flag_gems
+# ARM CPU quantized backends do not require FlagGems.  Import it only when an
+# accelerator-specific caller actually asks for FlagGems metadata.  Importing
+# FlagGems has process-wide torch-dispatch side effects, so doing it while the
+# vLLM plugin entry point is merely being discovered can replace native CPU ops.
+flag_gems = None
+DeviceDetector = None
+backend = None
+_FLAG_GEMS_IMPORT_ATTEMPTED = False
+
+
+def _load_flag_gems() -> bool:
+    global flag_gems, DeviceDetector, backend, _FLAG_GEMS_IMPORT_ATTEMPTED
+    if _FLAG_GEMS_IMPORT_ATTEMPTED:
+        return flag_gems is not None
+    _FLAG_GEMS_IMPORT_ATTEMPTED = True
+
     try:
-        # FlagGems<=5.0.2: DeviceDetector lives in device.
-        from flag_gems.runtime.backend.device import DeviceDetector
-    except (ImportError, FileNotFoundError):
-        # FlagGems>5.0.2: DeviceDetector lives in device_finder.
-        from flag_gems.runtime.backend.device_finder import DeviceDetector
-    from flag_gems.runtime import backend
-except ImportError:
-    flag_gems = None
-    DeviceDetector = None
-    backend = None
+        import flag_gems as imported_flag_gems
+
+        try:
+            # FlagGems<=5.0.2: DeviceDetector lives in device.
+            from flag_gems.runtime.backend.device import (
+                DeviceDetector as imported_device_detector,
+            )
+        except (ImportError, FileNotFoundError):
+            # FlagGems>5.0.2: DeviceDetector lives in device_finder.
+            from flag_gems.runtime.backend.device_finder import (
+                DeviceDetector as imported_device_detector,
+            )
+        from flag_gems.runtime import backend as imported_backend
+    except ImportError:
+        return False
+
+    flag_gems = imported_flag_gems
+    DeviceDetector = imported_device_detector
+    backend = imported_backend
+    return True
 
 _OP_CONFIG: Optional[dict[str, str]] = None
 
@@ -221,6 +243,8 @@ _load_op_config_from_env()
 
 class DeviceInfo:
     def __init__(self):
+        if not _load_flag_gems():
+            raise ImportError("FlagGems is required for accelerator device discovery")
         self.device = DeviceDetector()
         self.supported_device = ["nvidia", "ascend", "metax", "mthreads", "sunrise", "thead"]
         backend.set_torch_backend_device_fn(self.device.vendor_name)
@@ -257,6 +281,8 @@ def get_flaggems_all_ops() -> list[str]:
     """
     Get all FlagGems operator names from flag_gems._FULL_CONFIG.
     """
+    if not _load_flag_gems():
+        return []
     try:
         # _FULL_CONFIG is a tuple of (op_name, function, ...) tuples
         # Some entries have 2 elements, some have 3
