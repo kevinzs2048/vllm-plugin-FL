@@ -10,8 +10,16 @@ on AArch64 CPUs with dot-product, i8mm, and BF16 extensions:
 - `torchpack`: uses `torch._weight_int8pack_mm`; activations remain BF16, so
   this mode is W8A16 rather than W8A8.
 
-Weights are quantized online from the BF16 checkpoint and packed once during
-model loading. The inference path does not materialize BF16 weights.
+For a standard compressed-tensors W8A8 checkpoint, `tleraw` consumes the
+checkpoint's channelwise symmetric INT8 weights and per-channel scales
+directly. It only normalizes scales to the runtime's FP32 ABI and converts the
+matrix to KleidiAI's packed layout; it does not dequantize or requantize the
+weights. Activations use dynamic per-token symmetric INT8, which matches the
+checkpoint quantization scheme.
+
+BF16 checkpoints remain supported through the online fallback path. Their
+weights are quantized and packed once during model loading; inference does not
+retain the BF16 matrix.
 
 ## Native source ownership and build
 
@@ -37,6 +45,10 @@ Controls:
 
 - `FL_CPU_INT8_BACKEND=tleraw|kleidiai|torchpack`: select the implementation;
   `tleraw` is the default.
+- `FL_CPU_INT8_SOURCE=auto|checkpoint|online`: `auto` (default) registers the
+  standard W8A8 checkpoint kernel and keeps BF16 online quantization as a
+  fallback; `checkpoint` disables BF16 online replacement; `online` retains
+  only the legacy BF16-to-INT8 path. This control applies to `tleraw`.
 - `FL_INT8_LMHEAD=1`: include a compatible language-model head; off by default.
 - `FL_CPU_INT8_STRICT=0`: fall back to BF16 if packing an eligible linear
   fails; strict failure is the default.

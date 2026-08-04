@@ -3,6 +3,7 @@
 import ctypes
 import logging
 import os
+import platform
 
 import torch
 import triton
@@ -12,6 +13,14 @@ from triton.language.extra.cpu import kleidiai
 from triton.language.extra.cpu.tle_ops import (
     kleidiai_w8a8_linear as gemm_w8a8_tle,
 )
+from vllm.model_executor.kernels.linear import (
+    Int8ScaledMMLinearKernel,
+    _POSSIBLE_INT8_KERNELS,
+)
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    Int8ScaledMMLinearLayerConfig,
+)
+from vllm.platforms import PlatformEnum, current_platform
 from vllm_fl.ops.cpu_quant_linear import (
     install_cpu_quantized_linear,
     require_arm_quant_extensions,
@@ -44,17 +53,33 @@ def _ptr(tensor):
 
 
 def _quantize_pack(weight):
-    """[N,K] bf16 -> KleidiAI qsi8cxp packed rhs blob (uint8)."""
+    """Online fallback: [N,K] BF16 -> packed channelwise symmetric INT8."""
     N, K = weight.shape
     w = weight.detach().to(torch.float32)
     scale = (w.abs().amax(dim=1) / 127.0).clamp(min=1e-8)
     qw = (w / scale[:, None]).round().clamp(-128, 127).to(torch.int8).contiguous()
-    scale_f32 = scale.to(torch.float32).contiguous()
+    return _pack_rhs(qw, scale)
+
+
+def _pack_rhs(weight, scale):
+    """Pack checkpoint-native INT8 weights without requantizing them."""
+    if weight.device.type != "cpu" or scale.device.type != "cpu":
+        raise ValueError("ARM W8A8 packing requires CPU weights and scales")
+    if weight.dtype != torch.int8 or weight.ndim != 2:
+        raise ValueError("ARM W8A8 weight must be a 2D torch.int8 tensor")
+    N, K = weight.shape
+    if scale.numel() != N:
+        raise ValueError(
+            f"ARM W8A8 requires one weight scale per row, got {scale.shape}"
+        )
+
+    weight_i8 = weight.detach().contiguous()
+    scale_f32 = scale.detach().reshape(-1).to(torch.float32).contiguous()
     packed = torch.empty(
         _PACK.flagtree_kai_w8a8_rhs_packed_size(N, K), dtype=torch.uint8
     )
     _PACK.flagtree_kai_w8a8_pack_rhs(
-        N, K, _ptr(qw), _ptr(scale_f32), _ptr(packed)
+        N, K, _ptr(weight_i8), _ptr(scale_f32), _ptr(packed)
     )
     return packed
 
@@ -133,17 +158,90 @@ def _prepare_linear(weight):
     return _make_cpu_linear(_quantize_pack(weight), N, K)
 
 
+class FlagTreeKleidiAIInt8LinearKernel(Int8ScaledMMLinearKernel):
+    """Direct KAI pack/compute for dynamic-symmetric channelwise W8A8."""
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cpu():
+            return False, "requires CPU"
+        if platform.machine().lower() not in {"aarch64", "arm64"}:
+            return False, "requires AArch64"
+        return True, None
+
+    @classmethod
+    def can_implement(
+        cls, config: Int8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        if not config.is_channelwise:
+            return False, "requires channelwise weight scales"
+        if config.is_static_input_scheme:
+            return False, "requires dynamic activation quantization"
+        if not config.input_symmetric:
+            return False, "requires symmetric activation quantization"
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        weight_name, scale_name, _, _, _ = self.layer_param_names
+        weight = getattr(layer, weight_name)
+        scale = getattr(layer, scale_name)
+        N, K = weight.shape
+        packed = _pack_rhs(weight, scale)
+        layer.register_buffer("_fl_w8a8_packed_rhs", packed, persistent=False)
+        self.N = N
+        self.K = K
+
+        # Loading is complete and the packed buffer owns all required data.
+        # Match vLLM's oneDNN kernel by releasing the checkpoint matrix.
+        setattr(layer, weight_name, None)
+        setattr(layer, scale_name, None)
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        out = linear_w8a8(x, layer._fl_w8a8_packed_rhs, self.N, self.K)
+        return out + bias.to(out.dtype) if bias is not None else out
+
+
+def register_checkpoint_int8_kernel() -> bool:
+    """Prioritize direct KAI for compatible standard W8A8 checkpoints."""
+    candidates = _POSSIBLE_INT8_KERNELS.setdefault(PlatformEnum.CPU, [])
+    if FlagTreeKleidiAIInt8LinearKernel in candidates:
+        return False
+    candidates.insert(0, FlagTreeKleidiAIInt8LinearKernel)
+    return True
+
+
 def enable_int8(verbose=True):
-    installed = install_cpu_quantized_linear(
-        backend="ARM W8A8 TLE",
-        prepare_linear=_prepare_linear,
-        supports_shape=lambda n, k: k % 8 == 0,
-        include_lm_head=INCLUDE_LM_HEAD,
-        strict=STRICT,
-        logger=logger,
-        initialize=_register_tle_w8a8,
-    )
-    if installed and verbose:
+    source = os.environ.get("FL_CPU_INT8_SOURCE", "auto").lower()
+    if source not in {"auto", "checkpoint", "online"}:
+        raise ValueError(
+            "FL_CPU_INT8_SOURCE must be 'auto', 'checkpoint' or 'online'"
+        )
+
+    _register_tle_w8a8()
+    checkpoint_registered = False
+    online_installed = False
+    if source in {"auto", "checkpoint"}:
+        checkpoint_registered = register_checkpoint_int8_kernel()
+    if source in {"auto", "online"}:
+        online_installed = install_cpu_quantized_linear(
+            backend="ARM W8A8 TLE",
+            prepare_linear=_prepare_linear,
+            supports_shape=lambda n, k: k % 8 == 0,
+            include_lm_head=INCLUDE_LM_HEAD,
+            strict=STRICT,
+            logger=logger,
+        )
+
+    if (checkpoint_registered or online_installed) and verbose:
         logger.info(
-            "[vllm_fl] ARM W8A8 enabled (FlagTree TLE-raw op, KleidiAI backing)"
+            "[vllm_fl] ARM W8A8 enabled (source=%s, FlagTree TLE-raw op, "
+            "KleidiAI backing)",
+            source,
         )

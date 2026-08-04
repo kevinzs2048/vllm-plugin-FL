@@ -1,14 +1,13 @@
-"""ARM CPU W4A8 Linear through FlagTree TLE-raw CPU ops.
+"""Offline channelwise ARM CPU W4A8 through FlagTree TLE-raw CPU ops.
 
-The compiled TLE op accepts arbitrary M and selects KleidiAI dotprod for
-decode (M=1) or i8mm for prefill (M>1) inside its C backing function.  Shape
-dispatch must not happen in Python: vLLM CPU uses DYNAMO_TRACE_ONCE and drops
-the warmup graph's shape guards before reusing it for decode.
+Weights and per-channel scales come directly from a standard vLLM W4A8
+checkpoint.  The compiled op accepts arbitrary M and selects KleidiAI dotprod
+for decode (M=1) or i8mm for prefill (M>1) inside its C backing function.
 """
 
 import ctypes
 import logging
-import os
+import platform
 
 import torch
 import triton
@@ -18,8 +17,14 @@ from triton.language.extra.cpu import kleidiai
 from triton.language.extra.cpu.tle_ops import (
     kleidiai_w4a8_linear as gemm_w4a8_i8mm,
 )
+from vllm.model_executor.kernels.linear import (
+    MPLinearKernel,
+    MPLinearLayerConfig,
+    _POSSIBLE_KERNELS,
+)
+from vllm.platforms import PlatformEnum, current_platform
+from vllm.scalar_type import scalar_types
 from vllm_fl.ops.cpu_quant_linear import (
-    install_cpu_quantized_linear,
     require_arm_quant_extensions,
 )
 from vllm_fl.ops.cpu_quant_tle import (
@@ -28,9 +33,6 @@ from vllm_fl.ops.cpu_quant_tle import (
 from vllm_fl.patches.dynamo_metrics import patch_dynamo_metrics_serialization
 
 logger = logging.getLogger("vllm_fl.cpu_int4_tleraw")
-INCLUDE_LM_HEAD = os.environ.get("FL_INT4_LMHEAD", "0") == "1"
-STRICT = os.environ.get("FL_CPU_INT4_STRICT", "1") != "0"
-BL = 32
 
 require_arm_quant_extensions("FL ARM W4A8 TLE backend")
 TLE_CACHE_ABI = kleidiai.runtime_abi("w4a8")
@@ -39,10 +41,9 @@ _PACK_LIBRARY = kleidiai.build_runtime("w4a8")
 # this source-built, process-global library.
 _PACK = ctypes.CDLL(str(_PACK_LIBRARY), mode=ctypes.RTLD_GLOBAL)
 _PACK.flagtree_kai_w4a8_rhs_packed_size.restype = ctypes.c_size_t
-_PACK.flagtree_kai_w4a8_rhs_packed_size.argtypes = [ctypes.c_size_t] * 3
+_PACK.flagtree_kai_w4a8_rhs_packed_size.argtypes = [ctypes.c_size_t] * 2
 _PACK.flagtree_kai_w4a8_pack_rhs.restype = None
 _PACK.flagtree_kai_w4a8_pack_rhs.argtypes = [
-    ctypes.c_size_t,
     ctypes.c_size_t,
     ctypes.c_size_t,
     ctypes.c_void_p,
@@ -62,39 +63,35 @@ def _pointer(tensor):
     return ctypes.c_void_p(tensor.data_ptr())
 
 
-def quant_native_qs4c32(weight, block_length=BL):
-    """Quantize [N,K] BF16 weights to native signed-int4 blocks."""
+def _pack_rhs(weight, scales):
+    """Pack checkpoint-native signed INT4 values and channelwise scales."""
+    if weight.device.type != "cpu" or scales.device.type != "cpu":
+        raise ValueError("ARM W4A8 packing requires CPU weights and scales")
+    if weight.dtype != torch.int8 or weight.ndim != 2:
+        raise ValueError("ARM W4A8 weight must be a 2D torch.int8 tensor")
     N, K = weight.shape
-    if K % 2 or K % block_length:
+    if K % 2:
+        raise ValueError(f"ARM W4A8 requires an even K dimension, got {K}")
+    if scales.numel() != N:
         raise ValueError(
-            f"W4A8 requires K divisible by {block_length}; got {(N, K)}"
+            f"ARM W4A8 requires one weight scale per row, got {scales.shape}"
         )
-    blocks = weight.detach().float().reshape(N, K // block_length, block_length)
-    max_indices = blocks.abs().argmax(dim=-1, keepdim=True)
-    signed_max = torch.gather(blocks, -1, max_indices)
-    scales = signed_max / -8.0
-    reciprocal = torch.where(
-        scales != 0, 1.0 / scales, torch.zeros_like(scales)
-    )
-    quantized = (blocks * reciprocal).round().clamp_(-8, 7).to(torch.int32)
-    unsigned = (quantized + 8).to(torch.uint8).reshape(N, K)
+    if torch.any(weight < -8) or torch.any(weight > 7):
+        raise ValueError("ARM W4A8 checkpoint weights must be in [-8, 7]")
+
+    unsigned = weight.detach().add(8).to(torch.uint8)
     native = (
         unsigned[:, 0::2] | (unsigned[:, 1::2] << 4)
     ).contiguous()
-    bf16_scales = scales.squeeze(-1).to(torch.bfloat16).contiguous()
-    return native, bf16_scales
-
-
-def _pack_rhs(native, scales, N, K):
+    scales_f32 = scales.detach().reshape(-1).to(torch.float32).contiguous()
     packed = torch.empty(
-        _PACK.flagtree_kai_w4a8_rhs_packed_size(N, K, BL), dtype=torch.uint8
+        _PACK.flagtree_kai_w4a8_rhs_packed_size(N, K), dtype=torch.uint8
     )
     _PACK.flagtree_kai_w4a8_pack_rhs(
         N,
         K,
-        BL,
         _pointer(native),
-        _pointer(scales),
+        _pointer(scales_f32),
         _pointer(packed),
     )
     return packed
@@ -163,36 +160,73 @@ def _(x, rhs, N, K):
     return x.new_empty((*x.shape[:-1], N), dtype=torch.bfloat16)
 
 
-def _make_cpu_linear(rhs, N, K):
-    def cpu_linear(x, weight, bias):
-        out = torch.ops.fltleraw.linear_w4a8(x, rhs, N, K)
+class FlagTreeKleidiAIInt4LinearKernel(MPLinearKernel):
+    """Direct KAI kernel for offline channelwise W4A8 checkpoints."""
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 1
+
+    @classmethod
+    def can_implement(
+        cls, config: MPLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cpu():
+            return False, "requires CPU"
+        if platform.machine().lower() not in {"aarch64", "arm64"}:
+            return False, "requires AArch64"
+        if config.weight_type != scalar_types.int4:
+            return False, "requires signed INT4 checkpoint weights"
+        if config.act_type != torch.bfloat16:
+            return False, "requires BF16 activations"
+        if config.zero_points or config.has_g_idx:
+            return False, "requires symmetric weights without activation ordering"
+        if config.group_size != config.partition_weight_shape[0]:
+            return False, "requires channelwise weight scales"
+        if config.partition_weight_shape[0] % 2:
+            return False, "requires an even input dimension"
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        weight = getattr(layer, self.w_q_name)
+        scales = getattr(layer, self.w_s_name)
+        N, K = weight.shape
+        packed = _pack_rhs(weight, scales)
+        layer.register_buffer("_fl_w4a8_packed_rhs", packed, persistent=False)
+        self.N = N
+        self.K = K
+
+        # The packed buffer is the runtime representation; release checkpoint
+        # tensors just as vLLM's native CPU kernel does after its own repack.
+        setattr(layer, self.w_q_name, None)
+        setattr(layer, self.w_s_name, None)
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        out = linear_w4a8(x, layer._fl_w4a8_packed_rhs, self.N, self.K)
         return out + bias.to(out.dtype) if bias is not None else out
 
-    return cpu_linear
 
-
-def _prepare_linear(weight):
-    N, K = weight.shape
-    native, scales = quant_native_qs4c32(
-        weight.detach().to(torch.bfloat16), BL
-    )
-    return _make_cpu_linear(_pack_rhs(native, scales, N, K), N, K)
+def register_checkpoint_int4_kernel() -> bool:
+    """Prioritize direct KAI for compatible standard W4A8 checkpoints."""
+    candidates = _POSSIBLE_KERNELS.setdefault(PlatformEnum.CPU, [])
+    if FlagTreeKleidiAIInt4LinearKernel in candidates:
+        return False
+    candidates.insert(0, FlagTreeKleidiAIInt4LinearKernel)
+    return True
 
 
 def enable_int4(verbose=True):
-    installed = install_cpu_quantized_linear(
-        backend="ARM W4A8 TLE",
-        prepare_linear=_prepare_linear,
-        supports_shape=lambda n, k: k % BL == 0 and n % 8 == 0,
-        include_lm_head=INCLUDE_LM_HEAD,
-        strict=STRICT,
-        logger=logger,
-        initialize=_register_tle_w4a8,
-    )
-    if installed and verbose:
+    _register_tle_w4a8()
+    registered = register_checkpoint_int4_kernel()
+    if registered and verbose:
         logger.info(
-            "[vllm_fl] CPU int4 TLE-raw enabled "
-            "(decode=dotprod, prefill=i8mm)"
+            "[vllm_fl] offline channelwise W4A8 enabled "
+            "(FlagTree TLE-raw; decode=dotprod, prefill=i8mm)"
         )
 
 

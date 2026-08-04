@@ -1,11 +1,15 @@
 # ARM CPU INT4
 
-The FL plugin uses a FlagTree TLE-raw W4A8 operator on AArch64 CPUs with
-dot-product, i8mm, and BF16 extensions. Runtime
-linear computation enters `create_cpu_kleidiai_w4a8_linear`; FlagTree's
-source-built runtime selects KleidiAI dot-product GEMV for decode (`M == 1`) and i8mm GEMM
-for prefill (`M > 1`). Python does not dispatch on `M`, because vLLM CPU's
-`DYNAMO_TRACE_ONCE` graph is reused after shape guards are removed.
+The FL plugin consumes offline, channelwise W4A8 checkpoints through a
+FlagTree TLE-raw operator on AArch64 CPUs with dot-product, i8mm, and BF16
+extensions. It does not quantize BF16 model weights at load time. Checkpoint
+weights must be signed INT4 values stored in `torch.int8`, with one scale per
+output channel and dynamic per-token INT8 activations.
+
+Runtime linear computation enters `create_cpu_kleidiai_w4a8_linear`.
+FlagTree selects KleidiAI dot-product GEMV for decode (`M == 1`) and BF16-output
+i8mm GEMM for prefill (`M > 1`). LHS packing is split over M and matmul is
+split over N, matching the native KleidiAI channelwise scheduling.
 
 The generated kernel specialization includes a cache identity derived from the
 FlagTree runtime source and compiler identity, so stale Triton kernels are not
@@ -25,16 +29,13 @@ runtime. `TRITON_KLEIDIAI_CACHE_DIR` may override the native cache directory.
 
 ## Run
 
-Enable the plugin with `VLLM_PLUGINS=fl`. Compile mode is on by default. INT4 is
-selected automatically when the installed FlagTree CPU package provides the
-runtime sources; otherwise the clean-install default remains BF16. The relevant controls are:
+Quantize the model offline with a vLLM compressed-tensors channelwise W4A8
+recipe, then enable the plugin with `VLLM_PLUGINS=fl`. Compile mode is on by
+default. The relevant controls are:
 
 - `FL_CPU_INT4=1`: require INT4; missing or invalid FlagTree support is a hard error.
 - `FL_CPU_INT4=0`: retain the ARM CPU platform but use BF16 linears.
 - `FL_CPU_INT4_BACKEND=tleraw`: the only supported INT4 runtime backend.
-- `FL_INT4_LMHEAD=1`: include a compatible language-model head; off by default.
-- `FL_CPU_INT4_STRICT=0`: allow an eligible linear that fails packing to fall
-  back to BF16; strict failure is the default.
 - `FL_CPU_UNIPROC=1`: opt into the faster in-process executor for a controlled
   single-worker deployment. The caller must configure OpenMP threads, affinity,
   and allocator preload. Otherwise vLLM's supported MP executor is retained.
@@ -53,3 +54,11 @@ Example:
 VLLM_PLUGINS=fl FL_CPU_UNIPROC=1 OMP_NUM_THREADS=8 OMP_WAIT_POLICY=ACTIVE \
   vllm serve /path/to/model --dtype bfloat16 --trust-remote-code
 ```
+
+The plugin only selects checkpoints whose effective group size equals K.
+Groupwise `group_size=32` checkpoints deliberately fall through to another
+vLLM kernel. If `lm_head` should also use W4A8, it must be an explicit target
+in the offline checkpoint and provide `lm_head.weight_scale`; there is no
+runtime `FL_INT4_LMHEAD` conversion. Evaluate output quality before doing this:
+the standard recipe ignores `lm_head` because channelwise INT4 can have
+materially larger quantization error there.

@@ -133,6 +133,99 @@ class TestCpuInt8Backends(unittest.TestCase):
             },
         )
 
+    def test_tleraw_checkpoint_kernel_packs_native_int8_weights(self):
+        from vllm.model_executor.kernels.linear import init_int8_linear_kernel
+        from vllm_fl.ops import cpu_int8_tleraw as op
+
+        op.register_checkpoint_int8_kernel()
+        kernel = init_int8_linear_kernel(
+            is_channelwise=True,
+            is_static_input_scheme=False,
+            input_symmetric=True,
+            module_name="test_checkpoint_w8a8",
+        )
+        self.assertIsInstance(kernel, op.FlagTreeKleidiAIInt8LinearKernel)
+
+        torch.manual_seed(0)
+        n, k = 64, 130
+        layer = torch.nn.Module()
+        weight = torch.randint(-128, 128, (n, k), dtype=torch.int8)
+        scale = torch.rand(n, 1, dtype=torch.float32) * 0.02 + 1e-4
+        layer.register_parameter(
+            "weight", torch.nn.Parameter(weight, requires_grad=False)
+        )
+        layer.register_parameter(
+            "weight_scale", torch.nn.Parameter(scale, requires_grad=False)
+        )
+        layer.register_parameter("input_scale", None)
+        layer.register_parameter("input_zero_point", None)
+        layer.register_parameter("azp_adj", None)
+
+        kernel.process_weights_after_loading(layer)
+        self.assertIsNone(layer.weight)
+        self.assertIsNone(layer.weight_scale)
+        self.assertEqual(layer._fl_w8a8_packed_rhs.dtype, torch.uint8)
+        self.assertNotIn("_fl_w8a8_packed_rhs", layer.state_dict())
+
+    def test_tleraw_checkpoint_kernel_rejects_other_int8_schemes(self):
+        from vllm.model_executor.kernels.linear.scaled_mm import (
+            Int8ScaledMMLinearLayerConfig,
+        )
+        from vllm_fl.ops.cpu_int8_tleraw import (
+            FlagTreeKleidiAIInt8LinearKernel as kernel,
+        )
+
+        supported = Int8ScaledMMLinearLayerConfig(
+            is_channelwise=True,
+            is_static_input_scheme=False,
+            input_symmetric=True,
+        )
+        self.assertEqual(kernel.can_implement(supported), (True, None))
+        for config in (
+            Int8ScaledMMLinearLayerConfig(False, False, True),
+            Int8ScaledMMLinearLayerConfig(False, True, False),
+            Int8ScaledMMLinearLayerConfig(True, True, True),
+        ):
+            self.assertFalse(kernel.can_implement(config)[0])
+
+    def test_tleraw_checkpoint_kernel_is_fullgraph_compile_safe(self):
+        code = r'''
+import torch
+from vllm.model_executor.kernels.linear import init_int8_linear_kernel
+from vllm_fl.ops import cpu_int8_tleraw as op
+
+op.register_checkpoint_int8_kernel()
+kernel = init_int8_linear_kernel(
+    is_channelwise=True,
+    is_static_input_scheme=False,
+    input_symmetric=True,
+    module_name="test_checkpoint_w8a8_fullgraph",
+)
+n, k = 64, 128
+layer = torch.nn.Module()
+torch.manual_seed(0)
+layer.register_parameter(
+    "weight",
+    torch.nn.Parameter(torch.randint(-128, 128, (n, k), dtype=torch.int8), False),
+)
+layer.register_parameter(
+    "weight_scale",
+    torch.nn.Parameter(torch.rand(n, 1, dtype=torch.float32) * 0.02 + 1e-4, False),
+)
+for name in ("input_scale", "input_zero_point", "azp_adj"):
+    layer.register_parameter(name, None)
+kernel.process_weights_after_loading(layer)
+
+def linear(x):
+    return kernel.apply_weights(layer, x)
+
+compiled = torch.compile(linear, fullgraph=True, dynamic=True)
+for m in (7, 3, 1, 7, 1):
+    x = torch.randn(m, k, dtype=torch.bfloat16)
+    torch.testing.assert_close(compiled(x), linear(x), rtol=0, atol=0)
+'''
+        self.run_in_fresh_cache(code)
+
     def test_w4_and_w8_tle_modules_can_execute_in_one_process(self):
         code = r'''
 import torch
@@ -141,13 +234,10 @@ from vllm_fl.ops import cpu_int8_tleraw as w8
 
 torch.manual_seed(42)
 n, k = 64, 128
-weight = torch.randn(n, k, dtype=torch.bfloat16)
-native, scales = w4.quant_native_qs4c32(weight)
-rhs = w4._pack_rhs(native, scales, n, k)
-unsigned = torch.empty((n, k), dtype=torch.uint8)
-unsigned[:, 0::2] = native & 0xF
-unsigned[:, 1::2] = native >> 4
-dequant = (unsigned.float() - 8) * scales.float().repeat_interleave(w4.BL, dim=1)
+weight = torch.randint(-8, 8, (n, k), dtype=torch.int8)
+scales = torch.rand(n, 1, dtype=torch.bfloat16) * 0.1 + 1e-3
+rhs = w4._pack_rhs(weight, scales)
+dequant = weight.float() * scales.float()
 x = torch.randn(1, k, dtype=torch.bfloat16)
 actual = w4.linear_w4a8(x, rhs, n, k).float()
 expected = x.float() @ dequant.T
