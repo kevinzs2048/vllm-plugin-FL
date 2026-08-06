@@ -50,6 +50,27 @@ _PACK.flagtree_kai_w4a8_pack_rhs.argtypes = [
     ctypes.c_void_p,
     ctypes.c_void_p,
 ]
+_PACK.flagtree_kai_w4a8_grouped_rhs_packed_size.restype = ctypes.c_size_t
+_PACK.flagtree_kai_w4a8_grouped_rhs_packed_size.argtypes = [ctypes.c_size_t] * 3
+_PACK.flagtree_kai_w4a8_grouped_pack_rhs.restype = None
+_PACK.flagtree_kai_w4a8_grouped_pack_rhs.argtypes = [
+    ctypes.c_size_t,
+    ctypes.c_size_t,
+    ctypes.c_size_t,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+    ctypes.c_void_p,
+]
+_PACK.flagtree_kai_w4a8_header_bytes.restype = ctypes.c_size_t
+# Zero means the two blockwise ukernels disagree on the packed RHS layout, so a
+# single buffer could not serve both decode and prefill.  Treat the grouped path
+# as unavailable rather than computing silently wrong results.
+_GROUPED_HEADER_BYTES = _PACK.flagtree_kai_w4a8_header_bytes()
+_GROUPED_SUPPORTED = _GROUPED_HEADER_BYTES > 0
+_GROUPED_MAGIC = 0x464C57344138
+# KleidiAI requires the block length to be a multiple of this.
+_GROUPED_BL_MULTIPLE = 32
 _PACK.flagtree_kai_w4a8_profile_reset.restype = None
 _PACK.flagtree_kai_w4a8_profile_count.restype = ctypes.c_size_t
 _PACK.flagtree_kai_w4a8_profile_get.argtypes = [
@@ -93,6 +114,63 @@ def _pack_rhs(weight, scales):
         _pointer(native),
         _pointer(scales_f32),
         _pointer(packed),
+    )
+    return packed
+
+
+def _pack_rhs_grouped(weight, scales, group_size):
+    """Pack checkpoint-native signed INT4 values with per-group scales.
+
+    Scales stay BF16 -- the checkpoint's own dtype -- so nothing is re-rounded
+    on the way to the kernel.  The block length rides in a header ahead of the
+    payload because the TLE op ABI has no room for it; see w4a8_layout.h.
+    """
+    if not _GROUPED_SUPPORTED:
+        raise RuntimeError(
+            "FlagTree KleidiAI runtime has no usable blockwise W4A8 layout"
+        )
+    if weight.device.type != "cpu" or scales.device.type != "cpu":
+        raise ValueError("ARM W4A8 packing requires CPU weights and scales")
+    if weight.dtype != torch.int8 or weight.ndim != 2:
+        raise ValueError("ARM W4A8 weight must be a 2D torch.int8 tensor")
+    N, K = weight.shape
+    if K % group_size:
+        raise ValueError(
+            f"ARM W4A8 group size {group_size} must divide K={K}"
+        )
+    if group_size % _GROUPED_BL_MULTIPLE:
+        raise ValueError(
+            f"ARM W4A8 group size must be a multiple of "
+            f"{_GROUPED_BL_MULTIPLE}, got {group_size}"
+        )
+    expected = (N, K // group_size)
+    if tuple(scales.shape) != expected:
+        raise ValueError(
+            f"ARM W4A8 grouped scales must be {expected}, got "
+            f"{tuple(scales.shape)}"
+        )
+    if torch.any(weight < -8) or torch.any(weight > 7):
+        raise ValueError("ARM W4A8 checkpoint weights must be in [-8, 7]")
+
+    unsigned = weight.detach().add(8).to(torch.uint8)
+    native = (
+        unsigned[:, 0::2] | (unsigned[:, 1::2] << 4)
+    ).contiguous()
+    scales_bf16 = scales.detach().to(torch.bfloat16).contiguous()
+    body = _PACK.flagtree_kai_w4a8_grouped_rhs_packed_size(N, K, group_size)
+    packed = torch.empty(_GROUPED_HEADER_BYTES + body, dtype=torch.uint8)
+    packed[:_GROUPED_HEADER_BYTES] = 0
+    header = packed[:16].view(torch.int64)
+    header[0] = _GROUPED_MAGIC
+    header[1] = group_size
+    _PACK.flagtree_kai_w4a8_grouped_pack_rhs(
+        N,
+        K,
+        group_size,
+        _pointer(native),
+        _pointer(scales_bf16),
+        scales_bf16.shape[1] * scales_bf16.element_size(),
+        ctypes.c_void_p(packed.data_ptr() + _GROUPED_HEADER_BYTES),
     )
     return packed
 
@@ -161,7 +239,12 @@ def _(x, rhs, N, K):
 
 
 class FlagTreeKleidiAIInt4LinearKernel(MPLinearKernel):
-    """Direct KAI kernel for offline channelwise W4A8 checkpoints."""
+    """Direct KAI kernel for offline W4A8 checkpoints.
+
+    Serves both channelwise (qsi4cxp) and grouped (qsi4c32p) scale layouts.
+    The layout is chosen per weight, so a grouped body and a channelwise
+    lm_head coexist in one model.
+    """
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -181,9 +264,21 @@ class FlagTreeKleidiAIInt4LinearKernel(MPLinearKernel):
             return False, "requires BF16 activations"
         if config.zero_points or config.has_g_idx:
             return False, "requires symmetric weights without activation ordering"
-        if config.group_size != config.partition_weight_shape[0]:
-            return False, "requires channelwise weight scales"
-        if config.partition_weight_shape[0] % 2:
+        K = config.partition_weight_shape[0]
+        if config.group_size != K:
+            # Grouped checkpoint: served by the blockwise (qsi4c32) ukernels.
+            if not _GROUPED_SUPPORTED:
+                return False, "runtime lacks a usable blockwise W4A8 layout"
+            if config.group_size <= 0 or K % config.group_size:
+                return False, (
+                    f"group size {config.group_size} must divide K={K}"
+                )
+            if config.group_size % _GROUPED_BL_MULTIPLE:
+                return False, (
+                    f"group size must be a multiple of "
+                    f"{_GROUPED_BL_MULTIPLE}"
+                )
+        if K % 2:
             return False, "requires an even input dimension"
         return True, None
 
@@ -191,7 +286,11 @@ class FlagTreeKleidiAIInt4LinearKernel(MPLinearKernel):
         weight = getattr(layer, self.w_q_name)
         scales = getattr(layer, self.w_s_name)
         N, K = weight.shape
-        packed = _pack_rhs(weight, scales)
+        group_size = self.config.group_size
+        if group_size == K:
+            packed = _pack_rhs(weight, scales)
+        else:
+            packed = _pack_rhs_grouped(weight, scales, group_size)
         layer.register_buffer("_fl_w4a8_packed_rhs", packed, persistent=False)
         self.N = N
         self.K = K
