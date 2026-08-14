@@ -36,6 +36,9 @@ def enable_qwen_runtime(*, verbose: bool = True) -> bool:
     from flag_gems.runtime.backend._arm.q4 import enable_vllm_q4_codegen
 
     enable_vllm_q4_codegen(verbose=verbose, runtime="libtriton_jit")
+    from flag_gems.integrations.vllm import maybe_install_kernel_coverage
+
+    maybe_install_kernel_coverage()
     _ACTIVE = True
     if verbose:
         _print_runtime_banner()

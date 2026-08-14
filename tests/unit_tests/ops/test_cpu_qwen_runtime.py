@@ -13,6 +13,8 @@ class TestCpuQwenRuntime(unittest.TestCase):
     def test_runtime_registration_does_not_set_machine_policy(self):
         q4_module = types.ModuleType("flag_gems.runtime.backend._arm.q4")
         q4_module.enable_vllm_q4_codegen = Mock()
+        integration_module = types.ModuleType("flag_gems.integrations.vllm")
+        integration_module.maybe_install_kernel_coverage = Mock()
         compatibility = Mock()
         gdn_bridge = Mock()
 
@@ -35,6 +37,7 @@ class TestCpuQwenRuntime(unittest.TestCase):
                 {
                     compatibility_module.__name__: compatibility_module,
                     q4_module.__name__: q4_module,
+                    integration_module.__name__: integration_module,
                 },
             ),
             patch.object(
@@ -53,6 +56,7 @@ class TestCpuQwenRuntime(unittest.TestCase):
             verbose=False,
             runtime="libtriton_jit",
         )
+        integration_module.maybe_install_kernel_coverage.assert_called_once_with()
 
     def test_gdn_bridge_delegates_to_flaggems(self):
         integration = types.ModuleType("flag_gems.integrations.vllm")
