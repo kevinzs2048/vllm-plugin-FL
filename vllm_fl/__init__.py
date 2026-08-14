@@ -1,6 +1,5 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
 
-import importlib.util
 import logging
 import os
 import platform
@@ -40,16 +39,6 @@ def _is_arm_cpu_build() -> bool:
         return "cpu" in metadata.version("vllm").lower()
     except metadata.PackageNotFoundError:
         return os.environ.get("VLLM_TARGET_DEVICE", "").lower() == "cpu"
-
-
-def _w4a8_assets_configured() -> bool:
-    """Return whether FlagTree ships its source-built W4A8 runtime."""
-    try:
-        return importlib.util.find_spec(
-            "triton.language.extra.cpu.kleidiai"
-        ) is not None
-    except (ImportError, ModuleNotFoundError, ValueError):
-        return False
 
 
 def __getattr__(name):
@@ -122,8 +111,8 @@ def _patch_custom_ops():
 
 def register():
     """Register the FL platform."""
-    # PlatformFL is accelerator-shaped. ARM CPU uses vLLM's native CPU platform
-    # plus the FL TLE-raw W4A8 integration installed by register_model().
+    # PlatformFL is accelerator-shaped. ARM CPU uses vLLM's native CPU
+    # platform plus the FlagGems runtime installed by register_model().
     if _is_arm_cpu_build():
         logger.info("[vllm_fl] ARM CPU -> FL CPU platform (native-backed)")
         return "vllm_fl.platform_cpu.CpuPlatformFL"
@@ -171,60 +160,47 @@ def register_model():
     """Register FL-specific models not yet upstream."""
     from vllm.platforms import current_platform
     if current_platform.device_type == "cpu" and _is_arm_cpu_build():
-        # INT8 modes have priority when explicitly enabled. KleidiAI/TLE-raw
-        # are W8A8 dynamic; torchpack is the torch-native W8A16 fallback.
+        # INT8 modes have priority when explicitly enabled. The production
+        # backend is FlagGems/libtriton_jit; torchpack is retained as an
+        # explicit torch-native diagnostic fallback.
         int8_enabled = os.environ.get("FL_CPU_INT8", "0").lower()
         if int8_enabled not in {"0", "1", "false", "true"}:
             raise ValueError("FL_CPU_INT8 must be one of: 0, 1, false, true")
         if int8_enabled in {"1", "true"}:
             int8_backend = os.environ.get(
-                "FL_CPU_INT8_BACKEND", "tleraw"
+                "FL_CPU_INT8_BACKEND", "libtriton_jit"
             ).lower()
-            if int8_backend == "tleraw":
-                from vllm_fl.ops.cpu_int8_tleraw import enable_int8
-            elif int8_backend == "kleidiai":
-                from vllm_fl.ops.cpu_int8_kai import enable_int8
-            elif int8_backend == "torchpack":
+            if int8_backend == "torchpack":
                 from vllm_fl.ops.cpu_int8_pack import enable_int8
             elif int8_backend == "libtriton_jit":
                 # FlagGems owns online W8 packing and the native Qwen GDN
                 # operations behind the same process-global operator library.
                 from vllm_fl.ops.cpu_qwen_runtime import enable_qwen_runtime
 
-                enable_qwen_runtime(backend="libtriton_jit")
+                enable_qwen_runtime()
                 return
             else:
                 raise ValueError(
-                    "FL_CPU_INT8_BACKEND must be 'tleraw', 'kleidiai', "
-                    "'libtriton_jit' or 'torchpack'"
+                    "FL_CPU_INT8_BACKEND must be 'libtriton_jit' "
+                    "or 'torchpack'"
                 )
 
             enable_int8()
             return
-        int4_setting = os.environ.get("FL_CPU_INT4")
-        if int4_setting is None:
-            enabled = "1" if _w4a8_assets_configured() else "0"
-            if enabled == "0":
-                logger.info(
-                    "[vllm_fl] W4A8 assets are not configured -> bf16; "
-                    "set FL_CPU_INT4=1 for strict activation"
-                )
-        else:
-            enabled = int4_setting.lower()
-            if enabled not in {"0", "1", "false", "true"}:
-                raise ValueError("FL_CPU_INT4 must be one of: 0, 1, false, true")
+        enabled = os.environ.get("FL_CPU_INT4", "0").lower()
+        if enabled not in {"0", "1", "false", "true"}:
+            raise ValueError("FL_CPU_INT4 must be one of: 0, 1, false, true")
         if enabled in {"1", "true"}:
-            from vllm_fl.ops.cpu_qwen_runtime import (
-                enable_qwen_runtime,
-                resolve_int4_backend,
-            )
+            configured = os.environ.get(
+                "FL_CPU_INT4_BACKEND", "libtriton_jit"
+            ).lower()
+            if configured != "libtriton_jit":
+                raise ValueError(
+                    "FL_CPU_INT4_BACKEND must be 'libtriton_jit'"
+                )
+            from vllm_fl.ops.cpu_qwen_runtime import enable_qwen_runtime
 
-            backend = resolve_int4_backend()
-            if backend == "tleraw":
-                from vllm_fl.ops.cpu_int4_tleraw import enable_int4
-
-                enable_int4()
-            enable_qwen_runtime(backend=backend)
+            enable_qwen_runtime()
         else:
             logger.info("[vllm_fl] FL_CPU_INT4=0 -> bf16 (int4 op skipped)")
         return

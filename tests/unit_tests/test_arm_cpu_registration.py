@@ -54,14 +54,5 @@ class TestArmCpuRegistration(unittest.TestCase):
         ):
             self.assertFalse(vllm_fl._is_arm_cpu_build())
 
-    def test_w4a8_default_requires_flagtree_runtime_sources(self):
-        with patch.object(vllm_fl.importlib.util, "find_spec") as find_spec:
-            find_spec.return_value = None
-            self.assertFalse(vllm_fl._w4a8_assets_configured())
-
-            find_spec.return_value = object()
-            self.assertTrue(vllm_fl._w4a8_assets_configured())
-
-
 if __name__ == "__main__":
     unittest.main()
