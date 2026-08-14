@@ -550,6 +550,45 @@ def install_vllm_gdn_fallback() -> None:
 
     original_packed_decode = gdn.GatedDeltaNetAttention._forward_core_decode_non_spec
 
+    def triton_packed_decode(
+        self,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        conv_state: torch.Tensor,
+        conv_weight: torch.Tensor,
+        state_indices: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> bool:
+        """Run the opt-in, single-launch FlagGems packed decode kernel."""
+        if not _enabled("FLAGGEMS_GDN_TRITON_DECODE", "0"):
+            return False
+        if mixed_qkv.shape[0] != 1 or state_indices.numel() != 1:
+            return False
+        from flag_gems.runtime.backend._arm.gdn.kernels import (
+            gdn_packed_decode_triton_out,
+        )
+
+        indices = state_indices.to(dtype=torch.int32).contiguous()
+        if self.conv1d.bias is None:
+            return False
+        gdn_packed_decode_triton_out(
+            mixed_qkv.contiguous(),
+            a.contiguous(),
+            b.contiguous(),
+            self.A_log,
+            self.dt_bias,
+            conv_state,
+            conv_weight,
+            self.conv1d.bias,
+            self.kv_cache[1],
+            indices,
+            core_attn_out,
+            int(os.getenv("FLAGGEMS_GDN_TRITON_BLOCK_KEY", "0")),
+            int(os.getenv("FLAGGEMS_GDN_TRITON_THREADS", "0")),
+        )
+        return True
+
     def native_packed_decode(
         self,
         mixed_qkv: torch.Tensor,
@@ -575,6 +614,17 @@ def install_vllm_gdn_fallback() -> None:
         conv_weight = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
+        if triton_packed_decode(
+            self,
+            mixed_qkv[:num_tokens],
+            a[:num_tokens],
+            b[:num_tokens],
+            conv_state,
+            conv_weight,
+            state_indices[:num_tokens],
+            core_attn_out[:num_tokens],
+        ):
+            return
         torch.ops.triton_jit_cpu.gdn_packed_decode(
             mixed_qkv[:num_tokens].contiguous(),
             a[:num_tokens].contiguous(),
@@ -645,20 +695,30 @@ def install_vllm_gdn_fallback() -> None:
         )
         state_indices = attn_metadata.non_spec_state_indices_tensor[:1]
         core_attn_out = torch.empty_like(z)
-        torch.ops.triton_jit_cpu.gdn_packed_decode(
-            mixed_qkv.contiguous(),
-            a.contiguous(),
-            b.contiguous(),
-            self.A_log,
-            self.dt_bias,
+        if not triton_packed_decode(
+            self,
+            mixed_qkv,
+            a,
+            b,
             conv_state,
             conv_weight,
-            self.conv1d.bias,
-            self.kv_cache[1],
-            state_indices.to(dtype=torch.int32).contiguous(),
+            state_indices,
             core_attn_out,
-            True,
-        )
+        ):
+            torch.ops.triton_jit_cpu.gdn_packed_decode(
+                mixed_qkv.contiguous(),
+                a.contiguous(),
+                b.contiguous(),
+                self.A_log,
+                self.dt_bias,
+                conv_state,
+                conv_weight,
+                self.conv1d.bias,
+                self.kv_cache[1],
+                state_indices.to(dtype=torch.int32).contiguous(),
+                core_attn_out,
+                True,
+            )
         normalized = self.norm(
             core_attn_out.reshape(-1, self.head_v_dim),
             z.reshape(-1, self.head_v_dim),

@@ -51,6 +51,7 @@ def _configure_runtime_defaults() -> None:
         "FLAGGEMS_GDN_NATIVE_PACKED_DECODE": "1",
         "FLAGGEMS_GDN_NATIVE_NORM": "1",
         "FLAGGEMS_GDN_NATIVE_FAST_FORWARD": "1",
+        "FLAGGEMS_GDN_TRITON_DECODE": "0",
         "FLAGGEMS_Q4_RELEASE_SOURCE_WEIGHTS": "1",
         "FLAGGEMS_RELEASE_BF16_LM_HEAD": "1",
         "FLAGGEMS_GDN_CONV_PREFILL_TRITON": "1",
@@ -112,6 +113,7 @@ def _gdn_label(gdn_backend: str, runtime: str | None) -> str:
         ("FLAGGEMS_GDN_NATIVE_PACKED_DECODE", "native-packed-decode"),
         ("FLAGGEMS_GDN_NATIVE_NORM", "native-norm"),
         ("FLAGGEMS_GDN_NATIVE_FAST_FORWARD", "native-fast-forward"),
+        ("FLAGGEMS_GDN_TRITON_DECODE", "triton-packed-decode"),
         ("FLAGGEMS_Q4_FUSED_GDN_INPUT", "fused-q4-input"),
     )
     parts.extend(label for name, label in flags if _enabled(name))
