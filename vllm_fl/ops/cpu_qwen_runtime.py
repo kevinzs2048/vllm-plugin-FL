@@ -166,6 +166,11 @@ def enable_qwen_runtime(
             )
         return False
 
+    from vllm_fl.patches.arm_cpu_vllm_0202 import (
+        install_arm_cpu_vllm_0202_compat,
+    )
+
+    install_arm_cpu_vllm_0202_compat()
     _configure_runtime_defaults()
     gdn_backend = _configure_darwin_gdn_safety()
     if gdn_backend == "torch":

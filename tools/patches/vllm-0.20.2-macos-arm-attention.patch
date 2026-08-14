@@ -1,0 +1,36 @@
+diff --git a/cmake/cpu_extension.cmake b/cmake/cpu_extension.cmake
+index 8535186cc..3116b4b5c 100644
+--- a/cmake/cpu_extension.cmake
++++ b/cmake/cpu_extension.cmake
+@@ -25,6 +25,14 @@ set (ENABLE_NUMA TRUE)
+ #
+ if(MACOSX_FOUND)
+     list(APPEND CXX_COMPILE_FLAGS
++        # AppleClang ignores OpenMP pragmas unless the frontend flag is passed
++        # explicitly.  PyTorch's macOS wheel already links libtorch_cpu against
++        # @rpath/libomp.dylib, so the vLLM extension only needs to compile its
++        # CPU attention loops with OpenMP enabled.  Without these flags the
++        # source still builds, but cpu_attention_with_kv_cache silently runs
++        # single-threaded.
++        "-Xpreprocessor"
++        "-fopenmp"
+         "-DVLLM_CPU_EXTENSION")
+ else()
+     list(APPEND CXX_COMPILE_FLAGS
+diff --git a/csrc/cpu/cpu_attn_neon_bfmmla.hpp b/csrc/cpu/cpu_attn_neon_bfmmla.hpp
+index fb133aa13..d61582bb0 100644
+--- a/csrc/cpu/cpu_attn_neon_bfmmla.hpp
++++ b/csrc/cpu/cpu_attn_neon_bfmmla.hpp
+@@ -508,7 +508,11 @@ class AttentionImplNEONBFMMLA {
+   // HeadDimAlignment equals head_dim so that the PV phase processes
+   // the full head dimension in a single gemm call.
+   static constexpr int64_t HeadDimAlignment = head_dim;
+-  static constexpr int64_t MaxQHeadNumPerIteration = 16;
++  // Qwen3.6 uses six query heads per KV head. A 16-row tile processes only
++  // two query tokens (12 rows); 24 rows processes four tokens exactly and
++  // reduces the surrounding scheduling/mask/softmax loop overhead while
++  // retaining the same 8-row BFMMLA micro-kernel blocks.
++  static constexpr int64_t MaxQHeadNumPerIteration = 24;
+   static constexpr int64_t HeadDim = head_dim;
+   static constexpr ISA ISAType = isa_type;
+   static constexpr bool scale_on_logits = false;

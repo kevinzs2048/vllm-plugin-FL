@@ -72,3 +72,13 @@ class CpuPlatformFL(CpuPlatform):
             )
 
         logger.info("[vllm_fl] FL ARM CPU platform active (native-backed)")
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config) -> None:
+        """Align hybrid attention pages without patching vLLM's CPU class."""
+        model_config = vllm_config.model_config
+        if not model_config or not model_config.is_hybrid:
+            return
+        backend_cls = cls._find_non_ssm_backend(vllm_config)
+        if backend_cls is not None:
+            cls._align_hybrid_block_size(vllm_config, backend_cls)
