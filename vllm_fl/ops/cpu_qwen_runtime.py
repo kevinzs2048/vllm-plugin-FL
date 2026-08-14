@@ -41,7 +41,7 @@ def resolve_int4_backend(configured: str | None = None) -> str:
 
 def _configure_runtime_defaults() -> None:
     defaults = {
-        "FLAGGEMS_VENDOR_NAME": "arm",
+        "FLAGGEMS_VENDOR": "arm",
         "TRITON_BACKENDS_IN_TREE": "1",
         "TRITON_CPU_BACKEND": "1",
         "TRITON_CPU_FIXED_I8MM": "1",
