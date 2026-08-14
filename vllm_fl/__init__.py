@@ -186,9 +186,17 @@ def register_model():
                 from vllm_fl.ops.cpu_int8_kai import enable_int8
             elif int8_backend == "torchpack":
                 from vllm_fl.ops.cpu_int8_pack import enable_int8
+            elif int8_backend == "libtriton_jit":
+                # FlagGems owns online W8 packing and the native Qwen GDN
+                # operations behind the same process-global operator library.
+                from vllm_fl.ops.cpu_qwen_runtime import enable_qwen_runtime
+
+                enable_qwen_runtime(backend="libtriton_jit")
+                return
             else:
                 raise ValueError(
-                    "FL_CPU_INT8_BACKEND must be 'tleraw', 'kleidiai' or 'torchpack'"
+                    "FL_CPU_INT8_BACKEND must be 'tleraw', 'kleidiai', "
+                    "'libtriton_jit' or 'torchpack'"
                 )
 
             enable_int8()
@@ -206,12 +214,17 @@ def register_model():
             if enabled not in {"0", "1", "false", "true"}:
                 raise ValueError("FL_CPU_INT4 must be one of: 0, 1, false, true")
         if enabled in {"1", "true"}:
-            backend = os.environ.get("FL_CPU_INT4_BACKEND", "tleraw").lower()
-            if backend != "tleraw":
-                raise ValueError("FL_CPU_INT4_BACKEND must be 'tleraw'")
-            from vllm_fl.ops.cpu_int4_tleraw import enable_int4
+            from vllm_fl.ops.cpu_qwen_runtime import (
+                enable_qwen_runtime,
+                resolve_int4_backend,
+            )
 
-            enable_int4()
+            backend = resolve_int4_backend()
+            if backend == "tleraw":
+                from vllm_fl.ops.cpu_int4_tleraw import enable_int4
+
+                enable_int4()
+            enable_qwen_runtime(backend=backend)
         else:
             logger.info("[vllm_fl] FL_CPU_INT4=0 -> bf16 (int4 op skipped)")
         return
