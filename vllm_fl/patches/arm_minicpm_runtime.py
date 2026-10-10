@@ -28,6 +28,8 @@ def install():
     install_w8a8()
     install_moe()
     install_vllm_gdn_bridge()
+    from vllm_fl.patches.arm_gemma_norm import install as install_gemma_norm
+    install_gemma_norm()
     _ACTIVE = True
     return True
 
