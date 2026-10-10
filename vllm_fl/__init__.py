@@ -201,6 +201,8 @@ def register():
     # preserve vLLM's stock CPU platform and install kernels in register_model().
     arm_cpu_platform = _arm_cpu_platform()
     if arm_cpu_platform is not None:
+        if os.environ.get('FL_CPU_UNIPROC') == '1':
+            return 'vllm_fl.platform_cpu.CpuPlatformFL'
         logger.info("[vllm_fl] ARM64 CPU target -> vLLM CPU platform")
         return arm_cpu_platform
 
@@ -271,6 +273,10 @@ def register_model():
 
     apply_qwen3_5_text_patches()
 
+    from vllm_fl.models.minicpmv4_7.registration import register_model as register_minicpm
+
+    register_minicpm()
+
     from vllm.platforms import current_platform
     if current_platform.device_type == "cpu" and _arm_cpu_platform() is not None:
         from vllm_fl.patches.arm_cpu_gdn import (
@@ -304,6 +310,12 @@ def register_model():
         )
 
         install_arm_cpu_packed_w4a8()
+        from vllm_fl.quantization.arm_cpu_native import enabled as native_enabled
+
+        if native_enabled():
+            from vllm_fl.patches.arm_minicpm_runtime import install
+
+            install()
         return
 
     _register_flagcx_connector()

@@ -180,6 +180,7 @@ def install_arm_cpu_packed_w4a8() -> bool:
             # checkpoint path.  Stock vLLM W4A8 kernels must keep their
             # original loading and execution behavior.
             self.kernel._vllm_fl_arm_packed_checkpoint = True
+            self.kernel._vllm_fl_input_asymmetric = not self.input_symmetric
             return
 
         def get_scheme_from_parts(
@@ -218,7 +219,24 @@ def install_arm_cpu_packed_w4a8() -> bool:
                 return
 
             config = self.config
+            from .arm_cpu_native import prepare_g32
+
+            if prepare_g32(self, layer):
+                return
             if config.group_size != 128 or config.zero_points:
+                # The stock Dynamic4bit kernel expects signed INT8 codes,
+                # not the checkpoint's eight-codes-per-INT32 storage.
+                # This also covers small G32 projections outside the native
+                # shape contract (for example the 64-wide GDN b/a input).
+                quantized = getattr(layer, self.w_q_name)
+                if quantized.dtype == torch.int32:
+                    k, n = config.partition_weight_shape
+                    if quantized.shape != (n, k // 8):
+                        raise RuntimeError('unexpected packed-Q4 parameter shape')
+                    replace_parameter(layer, self.w_q_name, torch.nn.Parameter(
+                        unpack_from_int32(quantized.detach(), 4, torch.Size((n, k))).contiguous(),
+                        requires_grad=False,
+                    ))
                 original_process(self, layer)
                 return
 
@@ -299,6 +317,10 @@ def install_arm_cpu_packed_w4a8() -> bool:
             input: torch.Tensor,
             bias: torch.Tensor | None = None,
         ) -> torch.Tensor:
+            if hasattr(self, '_fl_arm_g32'):
+                from .arm_cpu_native import apply_g32
+
+                return apply_g32(self, layer, input, bias)
             shape = getattr(self, "_vllm_fl_arm_w4a8_shape", None)
             if shape is None:
                 return original_apply(self, layer, input, bias)
