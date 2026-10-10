@@ -182,5 +182,3 @@ def _install_cpu_sampling_rng() -> None:
     CPUModelRunner._sample = sample
     CPUModelRunner._bookkeeping_sync = bookkeeping
     CPUModelRunner._vllm_fl_cpu_sampling_rng = True
-
-
