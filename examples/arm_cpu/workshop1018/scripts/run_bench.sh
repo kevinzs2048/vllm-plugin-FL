@@ -15,7 +15,11 @@ export VLLM_CPU_OMP_THREADS_BIND=nobind VLLM_ENABLE_V1_MULTIPROCESSING=0
 unset VLLM_CPU_KVCACHE_SPACE
 shift 2
 if [[ "$MODE" == flagos-dev || "$MODE" == flagos ]]; then
-  export BUILD_VARIANT=source-built
+  if [ -f /work/envs/dev/PREBUILT-INSTALLED.json ]; then
+    export BUILD_VARIANT=prebuilt
+  else
+    export BUILD_VARIANT=source-built
+  fi
   exec bash /work/scripts/dev_python.sh /work/scripts/bench.py \
     --mode flagos --output "$REPORT" "$@"
 else

@@ -10,7 +10,7 @@ CIX P1 / MiniCPM-V-4.7-1B W8A8 / FlagOS：新板卡在线部署指南
    下载完整仓库，保留权重分片、配置、Tokenizer、Processor和模型Python文件。
 3. 预编译包：FlagOS-CIX-P1-prebuilt-cp311-torch211-20261016-r1.tar.gz，174,323,622字节。
    包含FlagTree-CPU、FlagGems与vLLM-plugin-FL三个wheel，以及安装检查工具。
-4. 轻量Workshop包：FlagOS-CIX-P1-online-workshop-20261017-r1.tar.gz，约0.4MB。
+4. 轻量Workshop包：FlagOS-CIX-P1-online-workshop-20261017-r2.tar.gz，约0.4MB。
    包含启动/检查/HTTP/性能脚本、固定版本与模型哈希清单、示例图片、OCR字体及许可证。
    它不含模型、Docker层、LLVM SDK、源码仓库或预编译wheel。
 
@@ -36,7 +36,7 @@ vllm-plugin-FL   f0de702335902facfffe625c0690f7a3df7f617d
 
 二、主机条件与固定目录
 
-账号baai，HOME=/home/baai。Linux aarch64，32GiB或以上内存（至少30GiB可用主机内存）。
+账号baai，HOME=/home/baai。Linux aarch64，16 GB或以上物理内存（系统可见内存至少15 GiB）。首次启动仍会生成JIT缓存。
 八个Cortex-A720：0,1,6,7,8,9,10,11。不同CPU编号的板卡要先重新确认亲和性。
 建议新板至少25GiB空闲磁盘；Docker数据目录若在另一块盘，也要留出镜像下载/解压空间。
 主机先具备Docker daemon、sudo -n docker权限、Python>=3.9、python3-venv、Git、curl、tar、gzip。
@@ -57,8 +57,8 @@ test ! -e "$WORK_ROOT"
 mkdir "$WORK_ROOT"
 mkdir "$WORK_ROOT/downloads"
 cd "$WORK_ROOT"
-export ONLINE_RELEASE='https://github.com/kevinzs2048/vllm-plugin-FL/releases/download/cix-p1-online-workshop-20261017-r1'
-export KIT=FlagOS-CIX-P1-online-workshop-20261017-r1.tar.gz
+export ONLINE_RELEASE='https://github.com/kevinzs2048/vllm-plugin-FL/releases/download/cix-p1-online-workshop-20261017-r2'
+export KIT=FlagOS-CIX-P1-online-workshop-20261017-r2.tar.gz
 curl -fL --retry 3 "$ONLINE_RELEASE/$KIT" -o "downloads/$KIT"
 curl -fL --retry 3 "$ONLINE_RELEASE/$KIT.sha256" -o "downloads/$KIT.sha256"
 (cd downloads && sha256sum -c "$KIT.sha256")
@@ -278,4 +278,12 @@ FlagTree的Sleef子模块：93f04d869471ce4d007abaebb8c6a7bc62749f61；需git su
 主要下载来源：
 ModelScope模型：https://modelscope.cn/models/FlagRelease/MiniCPM-V-4.7-1B-W8A8-arm-FlagOS
 预编译包：https://github.com/kevinzs2048/FlagGems/releases/tag/cix-p1-workshop-20261016-r1
-在线脚本/本指南：https://github.com/kevinzs2048/vllm-plugin-FL/releases/tag/cix-p1-online-workshop-20261017-r1
+在线脚本/本指南：https://github.com/kevinzs2048/vllm-plugin-FL/releases/tag/cix-p1-online-workshop-20261017-r2
+
+
+本次 r2 材料补充
+修正版脚本包接受16 GB板，包含ONLINE lock兼容的17项边界检查；模型、基础镜像和174MB预编译wheel包保持原版本。
+性能测试结束并停止HTTP服务后，在P1主机运行：
+python3 "$WORK_ROOT/scripts/test_workshop_boundaries.py" --output "$WORK_ROOT/evidence/boundaries-run01.json"
+必须显示 BOUNDARIES 17 / 17；已有结果换新文件名。
+本次发布不包含 build_source.sh、LLVM SDK 或源码构建依赖，现场只按预编译路线。

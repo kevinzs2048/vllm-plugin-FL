@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "bundle_id": "cix-p1-online-workshop-20261017-r1",
+  "bundle_id": "cix-p1-online-workshop-20261017-r2",
   "mode": "download image/model/source/prebuilt independently; no LLVM SDK for default path",
   "sources": {
     "FlagGems": "b5f5e110c7c2ae40521d0de897f3961467265fa5",
@@ -44,22 +44,37 @@
     "scripts/triton-tle.env": "c091136a54e8d07ec14f8def0710a6b68c609f4f734a550ecced0c70c2504b74",
     "scripts/check_stock.py": "b0b13aebe8e660094db007dcab217cc2d8bdb2c1d55c935d159644bbd4071bd0",
     "scripts/init_container.sh": "88323da024dd419769e0f2adfe47dd21e93952161a75efbadf9133d820d1e51c",
-    "scripts/run_raw_audit.sh": "8656a1ce2f5f721e57036f0048b2a4d3f29a80edeec18983611dfd20335d6f70",
+    "scripts/run_raw_audit.sh": "7e7313ca04f7adb6f41bddbaaaae1a3025af2e150ff08135fa3af9c9ebdba4de",
     "scripts/smoke_tree.py": "7649178ab6f5b2e2d7390c061d530fd5282a53cb32e2beb39372b9afb7a71c33",
     "scripts/start_service.sh": "7b3eb993cdc7280713cd73f0e7d5c0a36126e5d2d402970ee2f1eac1a0044300",
-    "scripts/check_platform.py": "7c49a1c174db6a75f7c6d01480069f39c0b40419c9e93501f4658559c601373f",
+    "scripts/check_platform.py": "64149867ce2eb4322777b0f165459571981a035b015202ced4e2e7886f8b1547",
     "scripts/bench.py": "197acae9cc095c6c9308a7e2a2d705f8baaca6670e2160ad8dc10032794345c5",
     "scripts/activate_host.env": "ecea33a5bb2b7b56a191cb7e223fa7151dffd40868f26adcd0419c923e303800",
     "scripts/validate_source.sh": "63d86e83c3711de94d9028924873232d8dc92fb70c84d0908d925a926bb90583",
     "scripts/http_request.py": "3d7722ae723608b90eeeb4435f98ec4c6646fd34685793d113345abc71bb6b18",
     "scripts/bench_raw.py": "5118d6174a197b5cb3d42751ba044b87622abdf42aa48d570a68d04cf6fdab3c",
     "scripts/verify_online_inputs.py": "ce8241bd7bc03f7784562cb5b98815d1d31c83656a1f5f0c3fd3a9b494c4f77a",
-    "scripts/run_bench.sh": "dc5a060ba8c74ac5780fb8d40e73ff27681dfefb631f1e01d9e09537e9b94a23",
+    "scripts/run_bench.sh": "ed1d942db1e4b2db402f02dbe2534c435b98adad41760134e877875d3ba40062",
     "scripts/fetch_sources.sh": "a6b1e19c921592818791412588a8510732d3fc558812f32c119bc21c01778f13",
     "scripts/check_preloaded.sh": "43f8c0f6ebc3537e696c196ada54ae0c0bd0c284f2051e21a89716866bc60569",
     "scripts/example.png": "fea09b41065d379ee5eb064e88a348261a6bd49af0303bdf902f0c1028ef93db",
     "assets/fonts/COPYRIGHT.txt": "63d3ba759d12804c5b31a9d5940d855c1820d1f5999e6b0872eb1c7ff045fbc9",
-    "assets/fonts/DejaVuSans.ttf": "abdc775b21b1bc470d50c97e790d276f2054b7504e56e5bd3e64f48d68582322"
+    "assets/fonts/DejaVuSans.ttf": "abdc775b21b1bc470d50c97e790d276f2054b7504e56e5bd3e64f48d68582322",
+    "scripts/test_workshop_boundaries.py": "731dc2de4d874e33f6d342c5b1fb9122aab24583411715ec2456e239de519bc3"
   },
-  "required_base_image_id": "sha256:72d655d6bf308074aa53374ae32e7f1596d0493b81c1960df0209994bc54816b"
+  "required_base_image_id": "sha256:72d655d6bf308074aa53374ae32e7f1596d0493b81c1960df0209994bc54816b",
+  "local_revision": {
+    "id": "online-r2-20261017",
+    "changes": [
+      "Accept 16 GB CIX P1 boards with at least 15 GiB system-visible physical memory",
+      "Ship online-lock-compatible 17-case isolated boundary checks",
+      "Label route audit from actual prebuilt installation receipt"
+    ]
+  },
+  "memory_requirement_revision": {
+    "id": "memory16-r2",
+    "minimum_usable_gib": 15,
+    "nominal_board_ram_gb": 16,
+    "reason": "User requested 16GB minimum; account for firmware-reserved memory"
+  }
 }
