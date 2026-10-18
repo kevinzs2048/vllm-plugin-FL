@@ -10,5 +10,9 @@ s.mkdir(exist_ok=True)
 if not p.exists() or requested:
  with tempfile.NamedTemporaryFile('w',dir=s,prefix='active-',delete=False) as f:
   f.write(run+'\n');f.flush();os.fsync(f.fileno());tmp=Path(f.name)
+ # Container root must not replace the host-owned selection with a 0600 file.
+ owner=p.stat() if p.exists() else s.stat()
+ tmp.chmod(0o644)
+ if os.geteuid()==0:os.chown(tmp,owner.st_uid,owner.st_gid)
  tmp.replace(p)
 print(run)

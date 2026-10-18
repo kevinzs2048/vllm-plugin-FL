@@ -1,13 +1,13 @@
 {
-  "revision": "workshop-step-scripts-20261018-r1",
+  "revision": "workshop-step-scripts-20261018-r2",
   "online_lock_sha256": "8d734f8989d23bb120380767dca72734d4d632eb2588aad984898f0188d202a1",
   "files": {
     "STEP-BY-STEP.txt": "0094263c75cef504fcd3a966803992f4c90bc40775b0b6da92a146a39f8d67be",
     "_steps/common.sh": "d4449f265b98abe36ecb62d157188eca457ad6648aac538bf624df0aee117b9d",
     "_steps/inspect_container.py": "fe991c8e08ac624ed6838484b257bd9514fa99cb9a55767209d2a6df087d78aa",
-    "_steps/select_run.py": "82cd10a50dc1a71ad7e8195c13013f537afa4aebce94821e574d642d2a265f11",
+    "_steps/select_run.py": "449cc5ce02ec15c251ba4ed190d3f893945989c9700f86ab662f233432d2068f",
     "_steps/show_comparison.py": "684ef677f16b69f206b2292c04466ed4cba29ecaec4ff2f4090d9c4b0e88f0c9",
-    "_steps/verify_steps.py": "f6b149ad087c0724bd1dc7b5353e51725bc2da4bd9930c0dab0936cfa3608723",
+    "_steps/verify_steps.py": "fd298f6658843ef82da5d7ff9604e22a7ec08a1a14bb2a3404867f16f75f8425",
     "_steps/wait_port.py": "9590125c3169bc644569bf7978d22df6ad7c961bc648754b9bbd0970af371ecf",
     "step01.sh": "a9b7136f725bdbd52b2c447a5cf46855591467cfd3e155e93f98e2cd9d347713",
     "step02.sh": "fee4d6d9c61508ef55f8b218de288f7ae5f6dbfe35144a87d4dd51cc4405c533",

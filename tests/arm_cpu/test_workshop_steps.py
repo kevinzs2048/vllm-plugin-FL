@@ -42,4 +42,9 @@ class WorkshopSteps(unittest.TestCase):
   first=subprocess.check_output(['python3',str(tool),str(self.root),'run02'],text=True).strip()
   second=subprocess.check_output(['python3',str(tool),str(self.root),''],text=True).strip()
   self.assertEqual((first,second),('run02','run02'))
+  p=self.root/'.workshop/active-run.txt'
+  self.assertEqual(p.stat().st_mode & 0o777,0o644)
+  subprocess.check_call(['python3',str(tool),str(self.root),'run03'],stdout=subprocess.DEVNULL)
+  self.assertEqual(p.stat().st_uid,os.getuid())
+  self.assertEqual(p.stat().st_mode & 0o777,0o644)
 if __name__=='__main__':unittest.main(verbosity=2)
