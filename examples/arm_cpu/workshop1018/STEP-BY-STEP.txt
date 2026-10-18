@@ -1,0 +1,74 @@
+CIX P1 workshop: short participant commands
+=========================================
+Preparation: the organizer preloads this helper package, the official three
+wheels, fixed Docker image, model and fixed source repositories. This package
+adds step01.sh through step15.sh to the existing r2 precompiled flow.
+It does not include models, wheels or Docker layers.
+
+On the P1 host:
+  cd ~/workshop1018
+  bash step01.sh
+  bash step02.sh
+  bash step03.sh
+  bash step04.sh
+  bash step05.sh
+
+Step05 creates the development container and opens a normal interactive Bash
+at /work. The host script waits while you use the container.
+It can also re-enter an existing running container only when its image and
+model/work directory mounts match this workshop. It never recreates it.
+Inside the development container:
+  bash step06.sh
+  bash step07.sh
+  exit
+
+After exit, you are back on the host in ~/workshop1018:
+  bash step08.sh
+  bash step09.sh
+  bash step10.sh
+  bash step11.sh
+
+Step11 stops only the matching workshop HTTP container, runs the expected
+stock-vLLM unsupported-architecture check, then opens the development Bash.
+Inside /work:
+  bash step12.sh
+  bash step13.sh
+  bash step14.sh
+  exit
+
+Back on the host:
+  bash step15.sh
+
+Each command must finish successfully before the next. Success markers are
+STEP01_PASS ... STEP15_PASS. Step05 and Step11 print PASS before opening the
+interactive container. Do not type exit until the corresponding PPT page.
+A new host terminal only needs cd ~/workshop1018; there is no manual export
+or source step. Scripts derive their root and persist the selected run ID.
+
+Results for the default run01:
+  evidence/workshop-run01/    model validation, stock/minimal/FlagOS/comparison
+  evidence/http-run01/        requests, responses, startup/full server logs
+  evidence/boundaries-run01.json
+  evidence/steps-run01/       timestamped logs for the participant scripts
+
+The installation target /work/envs is isolated from the image's runtime and
+host Python. The model stays mounted read-only at /model.
+Existing install prefixes, result directories, request/response files and
+benchmark files are never silently overwritten.
+
+Restarting a failed validation/measurement after checking the error:
+  bash step07.sh --run run02
+The run ID persists for subsequent steps in both host and container shells.
+Run the whole validation and both 5-repeat benchmark groups for this new run.
+Do not combine partial results. A new run does not reset an existing envs or
+development container; preserve and inspect them before repeating Step05/06.
+HTTP container names gain -run02 for a new run, avoiding name collisions.
+
+The optional --run does not reconfigure a running model server. Return to the
+right host/container as documented and finish Step08 for the selected run.
+Step15 waits up to 75 seconds for TCP TIME_WAIT, refuses a live/conflicting
+port binding, and never kills other processes or changes TCP settings.
+
+Source: kevinzs2048/vllm-plugin-FL, branch
+workshop1018-step-scripts-20261018,
+examples/arm_cpu/workshop1018.
