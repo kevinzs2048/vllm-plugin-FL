@@ -71,6 +71,82 @@ class TestArmCpuPackedW4A8(unittest.TestCase):
     def test_installer_is_idempotent(self):
         self.assertFalse(install_arm_cpu_packed_w4a8())
 
+    def test_g32_packed_checkpoint_matches_stock_signed_codes(self):
+        """Packed G32 must be unpacked even when native shape guards fail."""
+        from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
+
+        torch.manual_seed(20261010)
+        for n in (64, 128):
+            for symmetric in (True, False):
+                for backend in ("off", "native", "raw"):
+                    with (
+                        self.subTest(n=n, symmetric=symmetric, backend=backend),
+                        patch.dict(
+                            "os.environ",
+                            FL_ARM_NATIVE="0" if backend == "off" else "1",
+                            FL_ARM_OPERATOR_BACKEND=(
+                                "native" if backend == "off" else backend
+                            ),
+                        ),
+                    ):
+                        k = 256
+                        weight = torch.randint(-8, 8, (n, k), dtype=torch.int8)
+                        scales = torch.rand(n, k // 32, dtype=torch.bfloat16) * 0.02
+                        scheme = self.scheme_cls(
+                            strategy="group",
+                            num_bits=4,
+                            group_size=32,
+                            is_static_input_scheme=False,
+                            input_symmetric=symmetric,
+                            packed=True,
+                        )
+                        layer = torch.nn.Module()
+                        layer.bias = None
+                        with (
+                            patch(
+                                "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+                                return_value=0,
+                            ),
+                            patch(
+                                "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+                                return_value=1,
+                            ),
+                        ):
+                            scheme.create_weights(
+                                layer,
+                                output_size=n,
+                                input_size=k,
+                                output_partition_sizes=[n],
+                                input_size_per_partition=k,
+                                params_dtype=torch.bfloat16,
+                                weight_loader=lambda *args, **kwargs: None,
+                            )
+                        layer.weight_packed.data.copy_(pack_to_int32(weight, 4))
+                        layer.weight_scale.data.copy_(scales)
+                        reference = torch.nn.Module()
+                        reference.bias = None
+                        reference.weight_packed = torch.nn.Parameter(
+                            weight, requires_grad=False
+                        )
+                        reference.weight_scale = torch.nn.Parameter(
+                            scales, requires_grad=False
+                        )
+                        stock_process = self.kernel_cls._vllm_fl_arm_original_process
+                        stock_apply = self.kernel_cls._vllm_fl_arm_original_apply
+                        stock_process(scheme.kernel, reference)
+                        scheme.kernel.process_weights_after_loading(layer)
+                        self.assertEqual(
+                            hasattr(scheme.kernel, "_fl_arm_g32"),
+                            backend != "off" and n == 128,
+                        )
+                        for rows in (1, 16):
+                            x = torch.randn(rows, k, dtype=torch.bfloat16)
+                            expected = stock_apply(scheme.kernel, reference, x)
+                            actual = scheme.kernel.apply_weights(layer, x)
+                            torch.testing.assert_close(
+                                actual, expected, rtol=0.01, atol=0.01
+                            )
+
     def test_packed_checkpoint_scheme_preserves_metadata(self):
         from vllm.model_executor.layers.quantization.compressed_tensors import (
             compressed_tensors as config_module,

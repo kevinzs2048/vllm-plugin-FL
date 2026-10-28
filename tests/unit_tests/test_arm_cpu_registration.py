@@ -17,6 +17,40 @@ def _fake_vllm_platforms(cpu_platform="vllm.platforms.cpu.CpuPlatform"):
 
 
 class TestArmCpuRegistration(unittest.TestCase):
+    @unittest.skipUnless(
+        os.getenv("FLAGGEMS_ARM_NATIVE_LIBRARY")
+        and os.getenv("FLAGGEMS_VENDOR") == "arm",
+        "requires the compiled Arm TLE Raw leaf library",
+    )
+    def test_arm_operator_default_executes_raw_and_native_requires_explicit_choice(
+        self,
+    ):
+        import torch
+
+        from vllm_fl.ops.arm_operator_backend import flaggems_ops
+
+        weight = torch.ones(4, 32, dtype=torch.int8)
+        scales = torch.ones(4)
+        x = torch.ones(1, 32)
+        for backend in (None, "raw", "native"):
+            with self.subTest(backend=backend), patch.dict(os.environ):
+                if backend is None:
+                    os.environ.pop("FL_ARM_OPERATOR_BACKEND", None)
+                else:
+                    os.environ["FL_ARM_OPERATOR_BACKEND"] = backend
+                operators = flaggems_ops("w8a8")
+                expected_entry = torch.ops.flag_gems_arm_w8a8.linear
+                if backend != "native":
+                    expected_entry = expected_entry.raw
+                self.assertIs(operators.linear, expected_entry)
+                packed = operators.pack(weight, scales, False)
+                torch.testing.assert_close(
+                    operators.linear(x, packed, 4, False, 32, 128),
+                    torch.full((1, 4), 32.0),
+                    rtol=0,
+                    atol=0,
+                )
+
     def test_arm_host_uses_vllm_cpu_platform(self):
         platforms = _fake_vllm_platforms()
         with (
@@ -30,6 +64,7 @@ class TestArmCpuRegistration(unittest.TestCase):
 
     def test_arm_cpu_register_uses_vllm_cpu_platform(self):
         with (
+            patch.dict(os.environ, {"FL_CPU_UNIPROC": "0"}),
             patch.object(
                 vllm_fl,
                 "_arm_cpu_platform",
@@ -46,6 +81,17 @@ class TestArmCpuRegistration(unittest.TestCase):
             custom_ops.assert_not_called()
             flash_attn.assert_not_called()
             transformers.assert_not_called()
+
+    def test_arm_cpu_uni_platform_requires_explicit_opt_in(self):
+        with (
+            patch.dict(os.environ, {"FL_CPU_UNIPROC": "1"}),
+            patch.object(
+                vllm_fl,
+                "_arm_cpu_platform",
+                return_value="vllm.platforms.cpu.CpuPlatform",
+            ),
+        ):
+            self.assertEqual(vllm_fl.register(), "vllm_fl.platform_cpu.CpuPlatformFL")
 
     def test_arm_target_requires_vllm_cpu_backend(self):
         platforms = _fake_vllm_platforms(cpu_platform=None)

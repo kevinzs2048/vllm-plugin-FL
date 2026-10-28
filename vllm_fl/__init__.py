@@ -136,6 +136,8 @@ def register():
     arm_cpu_platform = _arm_cpu_platform()
     if arm_cpu_platform is not None:
         logger.info("[vllm_fl] ARM64 CPU target -> vLLM CPU platform")
+        if os.environ.get("FL_CPU_UNIPROC") == "1":
+            return "vllm_fl.platform_cpu.CpuPlatformFL"
         return arm_cpu_platform
 
     _patch_custom_ops()
@@ -262,6 +264,15 @@ def register_model():
         )
 
         install_arm_cpu_packed_w4a8()
+        from vllm_fl.patches.minicpmv47_cpu_model import install_cpu_model_hooks
+
+        install_cpu_model_hooks()
+        from vllm_fl.quantization.arm_cpu_native import enabled as arm_native_enabled
+
+        if arm_native_enabled():
+            from vllm_fl.patches.arm_minicpm_runtime import install
+
+            install()
         return
 
     from vllm_fl.models.hy4.registration import register_hy_v4_support
