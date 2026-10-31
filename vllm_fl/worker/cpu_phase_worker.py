@@ -7,13 +7,16 @@ import sys
 from pathlib import Path
 
 import torch
-
 from vllm.v1.worker.cpu_worker import CPUWorker
 
-from vllm_fl.worker.cpu_thread_policy import ThreadPolicy, execution_phase
+from vllm_fl.worker.cpu_thread_policy import (
+    BlocktimePolicy,
+    ThreadPolicy,
+    execution_phase,
+)
 
 
-def _torch_openmp():
+def _torch_openmp(*, blocktime=False):
     directory = Path(torch.__file__).parent / "lib"
     paths = (
         [directory / "libomp.dylib"]
@@ -30,6 +33,16 @@ def _torch_openmp():
     library.omp_set_num_threads.restype = None
     library.omp_get_max_threads.argtypes = []
     library.omp_get_max_threads.restype = ctypes.c_int
+    if blocktime:
+        if not all(
+            hasattr(library, name)
+            for name in ["kmp_set_blocktime", "kmp_get_blocktime"]
+        ):
+            raise RuntimeError("OpenMP blocktime policy requires LLVM/Intel libomp")
+        library.kmp_set_blocktime.argtypes = [ctypes.c_int]
+        library.kmp_set_blocktime.restype = None
+        library.kmp_get_blocktime.argtypes = []
+        library.kmp_get_blocktime.restype = ctypes.c_int
     return library
 
 
@@ -43,6 +56,11 @@ class CPUPhaseWorker(CPUWorker):
 
     def __init__(self, *args, **kwargs):
         self.thread_policy = ThreadPolicy.from_env()
+        self.blocktime_policy = BlocktimePolicy.from_env()
+        if self.blocktime_policy is not None and self.thread_policy is None:
+            raise ValueError(
+                "OpenMP blocktime policy requires explicit CPU phase threads"
+            )
         self.thread_calls = {}
         self.observed_threads = {}
         super().__init__(*args, **kwargs)
@@ -59,13 +77,17 @@ class CPUPhaseWorker(CPUWorker):
             raise ValueError("Phase threads require TP=1 and PP=1")
         # Match Torch's runtime directly; 1B W8A8 does not need to load G32,
         # KleidiAI or any model-specific extension just to set its thread count.
-        self._phase_openmp = _torch_openmp()
+        self._phase_openmp = _torch_openmp(blocktime=self.blocktime_policy is not None)
 
     def execute_model(self, scheduler_output):
         if self.thread_policy is not None:
             phase = execution_phase(scheduler_output, self.model_runner.requests)
             if phase != "idle":
-                count = self.thread_policy.threads_for(phase)
+                # Apply before the model runner constructs CPU attention
+                # metadata, which records and checks the execution thread count.
+                count = self.thread_policy.threads_for(
+                    phase, scheduler_output.total_num_scheduled_tokens
+                )
                 # CPUWorker.init_device replaces the Python export with a
                 # warning-only stub, including for nobind. Use Torch's own
                 # unchanged binding for this explicit unbound worker; do not
@@ -88,6 +110,17 @@ class CPUPhaseWorker(CPUWorker):
                     raise RuntimeError(
                         f"CPU phase thread setting failed: {phase}, {count}, {actual}"
                     )
+                if self.blocktime_policy is not None:
+                    blocktime = self.blocktime_policy.blocktime_for(
+                        phase, scheduler_output.total_num_scheduled_tokens
+                    )
+                    if self._phase_openmp.kmp_get_blocktime() != blocktime:
+                        self._phase_openmp.kmp_set_blocktime(blocktime)
+                    actual["openmp_blocktime_ms"] = (
+                        self._phase_openmp.kmp_get_blocktime()
+                    )
+                    if actual["openmp_blocktime_ms"] != blocktime:
+                        raise RuntimeError("OpenMP blocktime setting failed")
                 self.observed_threads[phase] = actual
                 self.thread_calls[phase] = self.thread_calls.get(phase, 0) + 1
         return super().execute_model(scheduler_output)

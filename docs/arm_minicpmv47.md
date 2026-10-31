@@ -29,6 +29,22 @@ uses request progress and does not equate a one-token prompt with decode.
 Without these explicit settings, the normal CPU platform/thread policy stays
 in effect. The worker supports vLLM 0.24's V1 runner, TP=PP=1.
 
+The same worker can optionally select fewer threads for short embedding/prefill
+requests. Set both `FL_CPU_SMALL_PREFILL_TOKENS` and
+`FL_CPU_SMALL_PREFILL_THREADS`; omitting both preserves the existing policy.
+The threshold applies to total scheduled tokens in a prefill-only batch. Mixed
+batches and decode retain their normal settings.
+
+On LLVM/Intel libomp, an optional short-prefill waiting policy requires all three
+variables: `FL_CPU_SHORT_BLOCKTIME_TOKENS`, `FL_CPU_SHORT_BLOCKTIME_MS`, and
+`FL_CPU_BLOCKTIME_MS`. Values are milliseconds; `KMP_BLOCKTIME` must not select
+microsecond units. For example, a threshold of 32 with waits of 1 and 0 requests
+1 ms for short prefill and 0 ms otherwise. The worker loads Torch's own OpenMP
+runtime, checks the applied values, and avoids setting an unchanged value.
+GNU libgomp supports phase threads but not this blocktime feature. These are
+explicit tuning controls, not model-independent performance defaults; retain
+the measured configuration and CPU-time cost for the particular workload.
+
 ## Quantization contracts
 
 G32 means 32 consecutive K-dimension weights per quantization group.

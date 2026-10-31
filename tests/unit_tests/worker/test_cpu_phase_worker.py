@@ -5,7 +5,11 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from vllm_fl.worker.cpu_thread_policy import ThreadPolicy, execution_phase
+from vllm_fl.worker.cpu_thread_policy import (
+    BlocktimePolicy,
+    ThreadPolicy,
+    execution_phase,
+)
 
 
 def schedule(new=(), cached=(), computed=(), tokens=None):
@@ -116,6 +120,7 @@ class TestCPUPhaseThreads(unittest.TestCase):
 
         worker = object.__new__(CPUPhaseWorker)
         worker.thread_policy = ThreadPolicy(8, 6)
+        worker.blocktime_policy = None
         worker.thread_calls = {}
         worker.observed_threads = {}
         worker.model_runner = NS(requests=states)
@@ -147,6 +152,66 @@ class TestCPUPhaseThreads(unittest.TestCase):
             torch.set_num_threads(old_torch)
             worker._phase_openmp.omp_set_num_threads(old_openmp)
 
+    def test_blocktime_policy_boundaries_and_configuration(self):
+        self.assertIsNone(BlocktimePolicy.from_env({}))
+        policy = BlocktimePolicy.from_env(
+            {
+                "FL_CPU_SHORT_BLOCKTIME_TOKENS": "512",
+                "FL_CPU_SHORT_BLOCKTIME_MS": "1",
+                "FL_CPU_BLOCKTIME_MS": "0",
+            }
+        )
+        self.assertEqual(policy.blocktime_for("prefill", 512), 1)
+        self.assertEqual(policy.blocktime_for("prefill", 513), 0)
+        self.assertEqual(policy.blocktime_for("prefill", 0), 0)
+        self.assertEqual(policy.blocktime_for("decode", 1), 0)
+        self.assertEqual(policy.blocktime_for("mixed", 32), 0)
+        with self.assertRaises(ValueError):
+            BlocktimePolicy.from_env({"FL_CPU_SHORT_BLOCKTIME_TOKENS": "512"})
+        with self.assertRaisesRegex(ValueError, "requires KMP_BLOCKTIME in ms"):
+            BlocktimePolicy.from_env(
+                {
+                    "FL_CPU_SHORT_BLOCKTIME_TOKENS": "512",
+                    "FL_CPU_SHORT_BLOCKTIME_MS": "1",
+                    "FL_CPU_BLOCKTIME_MS": "0",
+                    "KMP_BLOCKTIME": "200us",
+                }
+            )
+        for values in [(0, 1, 0), (512, -1, 0), (512, 1, -1)]:
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                BlocktimePolicy(*values)
+
+    def test_real_libomp_blocktime_follows_request_size(self):
+        from vllm.v1.worker.cpu_worker import CPUWorker
+
+        from vllm_fl.worker.cpu_phase_worker import CPUPhaseWorker, _torch_openmp
+
+        runtime = _torch_openmp()
+        if not hasattr(runtime, "kmp_get_blocktime"):
+            self.skipTest("LLVM/Intel libomp required")
+        worker = object.__new__(CPUPhaseWorker)
+        worker.thread_policy = ThreadPolicy(4, 4)
+        worker.blocktime_policy = BlocktimePolicy(512, 1, 0)
+        worker.thread_calls = {}
+        worker.observed_threads = {}
+        worker.model_runner = NS(requests=states)
+        worker._phase_openmp = _torch_openmp(blocktime=True)
+        import torch
+
+        old_threads = torch.get_num_threads()
+        old_openmp = runtime.omp_get_max_threads()
+        old_blocktime = worker._phase_openmp.kmp_get_blocktime()
+        try:
+            with patch.object(CPUWorker, "execute_model", return_value="result"):
+                worker.execute_model(schedule([fresh("a", 512)], tokens={"a": 512}))
+                self.assertEqual(worker._phase_openmp.kmp_get_blocktime(), 1)
+                worker.execute_model(schedule([fresh("a", 1024)], tokens={"a": 1024}))
+                self.assertEqual(worker._phase_openmp.kmp_get_blocktime(), 0)
+        finally:
+            torch._C.set_num_threads(old_threads)
+            runtime.omp_set_num_threads(old_openmp)
+            worker._phase_openmp.kmp_set_blocktime(old_blocktime)
+
     def test_execution_phase(self):
         for name, output, requests, expected in cases:
             with self.subTest(name=name):
@@ -174,6 +239,28 @@ class TestCPUPhaseThreads(unittest.TestCase):
             {"FL_CPU_PREFILL_THREADS": "8", "FL_CPU_DECODE_THREADS": "6"}
         )
         self.assertEqual(policy, ThreadPolicy(8, 6))
+
+    def test_optional_small_prefill_boundary_and_phase(self):
+        policy = ThreadPolicy.from_env(
+            {
+                "FL_CPU_PREFILL_THREADS": "18",
+                "FL_CPU_DECODE_THREADS": "8",
+                "FL_CPU_SMALL_PREFILL_TOKENS": "32",
+                "FL_CPU_SMALL_PREFILL_THREADS": "4",
+            }
+        )
+        self.assertEqual(policy.threads_for("prefill", 32), 4)
+        self.assertEqual(policy.threads_for("prefill", 33), 18)
+        self.assertEqual(policy.threads_for("prefill", 0), 18)
+        self.assertEqual(policy.threads_for("prefill"), 18)
+        self.assertEqual(policy.threads_for("mixed", 8), 18)
+        self.assertEqual(policy.threads_for("decode", 1), 8)
+        for tokens, threads in [(32, 0), (0, 4), (-1, 4), (32, 65)]:
+            with (
+                self.subTest(tokens=tokens, threads=threads),
+                self.assertRaises(ValueError),
+            ):
+                ThreadPolicy(18, 8, tokens, threads)
 
 
 if __name__ == "__main__":
