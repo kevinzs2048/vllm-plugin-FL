@@ -11,6 +11,10 @@ class ThreadPolicy:
     decode: int
     small_prefill_tokens: int = 0
     small_prefill_threads: int = 0
+    # Optional inclusive (maximum scheduled tokens, threads) ranges. Above
+    # the final bound, use prefill. Set on a dedicated worker before serving;
+    # hardware/model policy selection belongs to its caller.
+    prefill_ranges: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self):
         if not 1 <= self.prefill <= 64 or not 1 <= self.decode <= 64:
@@ -23,6 +27,23 @@ class ThreadPolicy:
             raise ValueError(
                 "Small-prefill token threshold and threads must both be positive or both zero"
             )
+        if not isinstance(self.prefill_ranges, tuple):
+            raise ValueError("Prefill ranges must be an immutable tuple")
+        if self.prefill_ranges and self.small_prefill_tokens:
+            raise ValueError("Choose small-prefill or prefill ranges, not both")
+        previous = 0
+        for entry in self.prefill_ranges:
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 2
+                or any(type(value) is not int for value in entry)
+                or entry[0] <= previous
+                or not 1 <= entry[1] <= 64
+            ):
+                raise ValueError(
+                    "Prefill ranges require increasing positive bounds and threads in [1, 64]"
+                )
+            previous = entry[0]
 
     @classmethod
     def from_env(cls, env=None):
@@ -42,6 +63,10 @@ class ThreadPolicy:
         )
 
     def threads_for(self, phase, tokens=None):
+        if phase == "prefill" and tokens is not None and tokens > 0:
+            for maximum, threads in self.prefill_ranges:
+                if tokens <= maximum:
+                    return threads
         if (
             phase == "prefill"
             and self.small_prefill_tokens

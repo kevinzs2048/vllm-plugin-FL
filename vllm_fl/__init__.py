@@ -216,6 +216,11 @@ def _patch_ascend_torch_accelerator() -> None:
 
 def register_model():
     """Register FL-specific models not yet upstream."""
+    if os.environ.get("FL_BGE_M3_ARM") == "1":
+        from vllm_fl.models.bge_m3_arm import register as register_bge_m3
+
+        register_bge_m3()
+
     _patch_ascend_torch_accelerator()
 
     # General plugins are loaded independently in spawned model-inspection and
